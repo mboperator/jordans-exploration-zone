@@ -4367,7 +4367,7 @@ const MODES = {
     desc:'Round-based plant and defuse, players split across both sides. Bots fill any empty slot.',
     max:6, teamSize:3, bots:true, rounds:true },
   coop: { id:'coop', label:'CO-OP — you vs the bots',
-    desc:'Everyone plays the same side against a bot team. Attack for four rounds, then defend.',
+    desc:'Everyone plays the same side against a bot team. Works solo or with friends — bots make up the opposition.',
     max:3, teamSize:3, bots:true, rounds:true, coop:true },
 };
 
@@ -4396,7 +4396,16 @@ function netStatus(msg, kind){
   el.textContent = msg || '';
   el.className = kind || '';
 }
-function lobbyStatus(msg){ const el = $('lobbyStatus'); if (el) el.textContent = msg || ''; }
+function lobbyStatus(msg, warn){
+  const el = $('lobbyStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = warn ? 'var(--atk)' : 'var(--dim)';
+  if (warn){                      /* a nudge, so a refusal cannot go unnoticed */
+    el.style.transition = 'none'; el.style.opacity = '0.25';
+    requestAnimationFrame(() => { el.style.transition = 'opacity .25s'; el.style.opacity = '1'; });
+  }
+}
 
 /* every human in the match, local player first */
 function humanActors(){
@@ -5201,8 +5210,15 @@ $('btnLeave').onclick = () => {
 $('btnBegin').onclick = () => {
   if (!NET.isHost) return;
   const M = MODES[NET.mode];
-  if (NET.players.size < 2){ lobbyStatus('Waiting for at least one other operator.'); SFX.ui('deny'); return; }
-  if (M.id === 'duel' && NET.players.size !== 2){ lobbyStatus('Duel is exactly two operators.'); SFX.ui('deny'); return; }
+  const needed = M.coop ? 1 : 2;
+  if (NET.players.size < needed){
+    lobbyStatus('Team needs at least one other operator — or switch to Co-op to take on the bots alone.', true);
+    SFX.ui('deny'); return;
+  }
+  if (M.id === 'duel' && NET.players.size !== 2){
+    lobbyStatus('Duel is exactly two operators — you have ' + NET.players.size + '.', true);
+    SFX.ui('deny'); return;
+  }
   SFX.ui('buy');
   const payload = { t: 'begin', mode: NET.mode, diff: SETTINGS.diff,
     players: Array.from(NET.players.values()).map(p => ({ id:p.id, name:p.name, team:p.team, host:!!p.host })) };
