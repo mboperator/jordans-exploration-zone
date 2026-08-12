@@ -4237,9 +4237,55 @@ function updateSpotting(dt){
 }
 
 let acc = 0, hudAcc = 0;
+/* Everything that advances the world, with no rendering in it. renderFrame
+   drives this normally; the keep-alive below drives it when the tab is
+   hidden and requestAnimationFrame has been stopped by the browser. */
+function stepGame(dt){
+  const NM = NET.on ? MODES[NET.mode] : null;
+  if (NM && !NM.rounds) duelTick(dt); else roundTick(dt);
+  if (GAME.phase === PHASE.OVER) return;
+  playerUpdate(dt);
+  if (!NET.on || NET.isHost) for (const b of bots) botUpdate(b, dt);
+  updateRemotes(dt);
+  netTick(dt);
+  if (player.alive && GAME.phase === PHASE.ACTION && (!NM || NM.rounds)) interactTick(dt);
+  else showPrompt(null);
+  if (GAME.spike.state === 'dropped'){
+    for (const b of bots){
+      if (b.alive && b.team === GAME.attackers &&
+          dist2(b.pos.x, b.pos.z, GAME.spike.pos.x, GAME.spike.pos.z) < 1.3){
+        pickupSpike(b); break;
+      }
+    }
+  }
+  updateSpotting(dt);
+  FX.updateTracers(dt);
+}
+
+/* A hidden tab has requestAnimationFrame stopped by the browser. For a host
+   that means the round clock freezes and world packets stop, which hangs the
+   match for everybody. Keep stepping on a timer, catching up in fixed
+   sub-steps so bots do not teleport when the tab comes back. */
+let __kaLast = 0;
+setInterval(() => {
+  if (!document.hidden || !NET.on || GAME.phase === PHASE.MENU || GAME.phase === PHASE.OVER){
+    __kaLast = 0; return;
+  }
+  const now = performance.now();
+  if (!__kaLast){ __kaLast = now; return; }
+  let elapsed = Math.min((now - __kaLast) / 1000, 2);
+  __kaLast = now;
+  while (elapsed > 0.001){
+    const dt = Math.min(elapsed, 1 / 30);
+    try { stepGame(dt); } catch (e) { console.error('keepalive step', e); break; }
+    elapsed -= dt;
+  }
+}, 250);
+
 function renderFrame(){
   const dt = Math.min(engine.getDeltaTime() / 1000, 0.05);
 
+  /* only orbit the map when we are genuinely sitting on a menu, never in a match */
   if (GAME.phase === PHASE.MENU){
     updateMenuCam(dt);
     GAME.t += dt;
@@ -4257,26 +4303,7 @@ function renderFrame(){
     return;
   }
 
-  if (NM && !NM.rounds) duelTick(dt); else roundTick(dt);
-  if (GAME.phase !== PHASE.OVER){
-    playerUpdate(dt);
-    if (!NET.on || NET.isHost) for (const b of bots) botUpdate(b, dt);
-    updateRemotes(dt);
-    netTick(dt);
-    if (player.alive && GAME.phase === PHASE.ACTION && (!NM || NM.rounds)) interactTick(dt);
-    else showPrompt(null);
-    /* bots picking the dropped breacher back up */
-    if (GAME.spike.state === 'dropped'){
-      for (const b of bots){
-        if (b.alive && b.team === GAME.attackers &&
-            dist2(b.pos.x, b.pos.z, GAME.spike.pos.x, GAME.spike.pos.z) < 1.3){
-          pickupSpike(b); break;
-        }
-      }
-    }
-    updateSpotting(dt);
-    FX.updateTracers(dt);
-  }
+  stepGame(dt);
 
   SFX.setListener(cam.position, player.yaw);
 
@@ -5055,7 +5082,15 @@ function beginNetMatch(asHost){
 
   if (M.rounds){
     if (asHost) startRound();
-    else { netRespawnLocal(); buildBuyMenu(); show('buy'); releasePointer(); }
+    else {
+      /* Enter the buy phase locally instead of waiting for the host's first
+         world packet -- otherwise we sit at PHASE.MENU, which renders the
+         map overview and skips the whole simulation branch. */
+      GAME.phase = PHASE.BUY;
+      GAME.timer = GAME.BUY_TIME;
+      GAME.ended = false;
+      netRespawnLocal(); buildBuyMenu(); show('buy'); releasePointer();
+    }
   } else {
     startDuel(asHost);
   }
