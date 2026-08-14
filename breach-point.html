@@ -2357,16 +2357,22 @@ function playerUpdate(dt){
   player.feetY = playerBody.position.y;
   const movedY = player.feetY - feetBefore;
 
-  /* grounded test: we asked to fall and barely did */
+  /* Grounding is decided by an explicit probe and then SNAPPED to the floor.
+     The old test inferred it from how far the collider let us fall, which the
+     resolver's tiny upward ejection always satisfied -- so gravity was zeroed
+     every single frame and the player slowly levitated out of the map. */
   const wasGrounded = player.grounded;
-  if (disp.y <= 0 && movedY > disp.y * 0.55){
+  const gy = groundUnder(cam.position.x, cam.position.z, player.feetY + 1.0);
+  if (gy !== null && player.vy <= 0 && player.feetY <= gy + 0.14){
     if (!wasGrounded && player.vy < -6){
       player.land = clamp(-player.vy / 18, 0, 1);
       player.shake = Math.max(player.shake, player.land * 0.4);
       SFX.step(true, 0);
     }
-    player.grounded = true; player.vy = 0;
-  } else if (disp.y < 0) {
+    player.feetY = gy;              /* snap: nothing can accumulate */
+    player.grounded = true;
+    player.vy = 0;
+  } else {
     player.grounded = false;
   }
   if (disp.y > 0 && movedY < disp.y * 0.5) player.vy = 0;   /* bonked a ceiling */
@@ -2500,6 +2506,13 @@ function updateViewmodel(dt, bobX){
 const vmSway = { x: 0, y: 0 };
 const lookDelta = { x: 0, y: 0 };
 
+/* What is directly under the feet, within reach. Used to decide grounding
+   explicitly rather than inferring it from the collision resolver. */
+function groundUnder(x, z, fromY){
+  const r = new BABYLON.Ray(V3(x, fromY, z), V3(0, -1, 0), 3.0);
+  const h = scene.pickWithRay(r, m => m.isPickable && m.checkCollisions && m.isEnabled());
+  return h && h.hit ? h.pickedPoint.y : null;
+}
 function groundYAt(pos){
   const r = new BABYLON.Ray(V3(pos.x, pos.y + 2, pos.z), V3(0,-1,0), 40);
   const h = scene.pickWithRay(r, m => m.isPickable && m.checkCollisions && m.isEnabled());
