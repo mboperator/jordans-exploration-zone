@@ -1133,7 +1133,7 @@ sun.shadowMinZ = 12; sun.shadowMaxZ = 190;
 /* Sky/bounce fill: warm from above, cool teal from the ground. This one pair
    does most of the Valorant "readable in every corner" heavy lifting.      */
 const sky = new BABYLON.HemisphericLight('sky', V3(0.1, 1, -0.15), scene);
-sky.intensity = 0.85;
+sky.intensity = 1.15;
 sky.diffuse = C3('#9fc4e8');
 sky.groundColor = C3('#2b4a55');
 sky.specular = C3('#7fa6c8');
@@ -1149,10 +1149,10 @@ midLight.intensity = 0.0; midLight.range = 30;
    they need their own fill or you start the round unable to see. */
 const spawnFillA = new BABYLON.PointLight('spawnFillA', V3(0, 5.2, -27), scene);
 spawnFillA.diffuse = C3('#ffc36e'); spawnFillA.specular = C3('#ffd9a8');
-spawnFillA.intensity = 0.70; spawnFillA.range = 26;
+spawnFillA.intensity = 3.0; spawnFillA.range = 26;
 const spawnFillD = new BABYLON.PointLight('spawnFillD', V3(0, 5.2, 29), scene);
 spawnFillD.diffuse = C3('#8fd8ff'); spawnFillD.specular = C3('#c8ecff');
-spawnFillD.intensity = 0.70; spawnFillD.range = 26;
+spawnFillD.intensity = 3.0; spawnFillD.range = 26;
 
 /* A small light welded to the camera keeps the weapon readable indoors. */
 const gunLight = new BABYLON.PointLight('gunL', V3(0.25, 0.45, -0.35), scene);
@@ -1725,8 +1725,8 @@ function buildMap(){
     });
   }
 
-  siteLight.intensity = 0.85;
-  midLight.intensity = 0.65;
+  siteLight.intensity = 1.5;
+  midLight.intensity = 1.5;
 }
 
 /* ============================================================= 6. WEAPONS */
@@ -3271,7 +3271,7 @@ const GAME = {
   playerSide: 'atk',
   BUY_TIME: 14, ACTION_TIME: 100, END_TIME: 5,
   PLANT_TIME: 4.0, DEFUSE_TIME: 7.0, DETONATE: 45,
-  baseFov: 1.25, mode: 'solo',
+  baseFov: 1.25, mode: 'solo', timerEnd: null,
   spike: { state:'carried', pos: V3(0,0,0), mesh:null, timer:0, beepT:0, carrier:null,
            defuseProg: 0, defuser: null },
   roundWinner: null, roundReason: '',
@@ -3311,6 +3311,27 @@ function buildSpike(){
   return root;
 }
 const inPlantZone = (x, z) => dist2(x, z, PLANT.x, PLANT.z) <= PLANT.r;
+
+/* Round time is wall-clock, not accumulated frame dt. Accumulating meant the
+   clock ran at whatever rate frames happened to arrive -- slow in a throttled
+   tab, and fast when the keep-alive caught up in capped chunks. Deadlines
+   cannot drift in either direction. */
+function setPhaseTimer(sec){
+  GAME.timer = sec;
+  GAME.timerEnd = performance.now() + sec * 1000;
+}
+function readPhaseTimer(){
+  if (GAME.timerEnd == null) return;
+  GAME.timer = Math.max(0, (GAME.timerEnd - performance.now()) / 1000);
+}
+function setSpikeTimer(sec){
+  GAME.spike.timer = sec;
+  GAME.spike.endAt = performance.now() + sec * 1000;
+}
+function readSpikeTimer(){
+  if (GAME.spike.endAt == null) return;
+  GAME.spike.timer = Math.max(0, (GAME.spike.endAt - performance.now()) / 1000);
+}
 
 function giveSpikeToAttackers(){
   GAME.spike.state = 'carried';
@@ -3361,7 +3382,7 @@ function pickupSpike(who){
 }
 function plantSpike(pos, by){
   GAME.spike.state = 'planted';
-  GAME.spike.timer = GAME.DETONATE;
+  setSpikeTimer(GAME.DETONATE);
   GAME.spike.beepT = 0;
   GAME.spike.defuseProg = 0;
   GAME.spike.pos = V3(pos.x, groundYAt(pos), pos.z);
@@ -3371,7 +3392,7 @@ function plantSpike(pos, by){
   spikeMesh.root.position.copyFrom(GAME.spike.pos);
   spikeMesh.root.setEnabled(true);
   spikeLight.intensity = 6;
-  GAME.timer = GAME.DETONATE;
+  setPhaseTimer(GAME.DETONATE);
   if (by) by.credits += 300;
   banner('SPIKE DOWN', GAME.attackers === player.team ? 'defend the plant' : 'defuse it');
   SFX.beep(1400);
@@ -3428,7 +3449,7 @@ function endRound(winnerSide, reason){
   if (GAME.ended) return;
   GAME.ended = true;
   GAME.phase = PHASE.END;
-  GAME.timer = GAME.END_TIME;
+  setPhaseTimer(GAME.END_TIME);
   GAME.roundWinner = winnerSide;
   GAME.roundReason = reason;
   if (winnerSide === 'atk') GAME.scoreAtk++; else GAME.scoreDef++;
@@ -3468,7 +3489,7 @@ function matchOver(){
 function startRound(){
   GAME.ended = false;
   GAME.phase = PHASE.BUY;
-  GAME.timer = GAME.BUY_TIME;
+  setPhaseTimer(GAME.BUY_TIME);
   GAME.spike.state = 'carried';
   GAME.spike.defuseProg = 0;
   if (spikeMesh) spikeMesh.root.setEnabled(false);
@@ -3560,7 +3581,7 @@ function roundTick(dt){
 
   if (NET.on && !NET.isHost){
     /* the host drives phases; run only the local spike feedback */
-    GAME.timer -= dt;
+    readPhaseTimer();
     if (GAME.spike.state === 'planted'){
       GAME.spike.beepT -= dt;
       if (GAME.spike.beepT <= 0){
@@ -3571,12 +3592,12 @@ function roundTick(dt){
     }
     return;
   }
-  GAME.timer -= dt;
+  readPhaseTimer();
 
   if (GAME.phase === PHASE.BUY){
     if (GAME.timer <= 0){
       GAME.phase = PHASE.ACTION;
-      GAME.timer = GAME.ACTION_TIME;
+      setPhaseTimer(GAME.ACTION_TIME);
       hide('buy');
       grabPointer();
       banner(player.team === GAME.attackers ? 'BREACH' : 'HOLD', null, 1.1);
@@ -3588,7 +3609,7 @@ function roundTick(dt){
 
   if (GAME.phase === PHASE.ACTION){
     if (GAME.spike.state === 'planted'){
-      GAME.spike.timer -= dt;
+      readSpikeTimer();
       GAME.timer = GAME.spike.timer;
       /* beep rate ramps as the fuse burns down */
       const interval = clamp(GAME.spike.timer / GAME.DETONATE, 0.06, 1) * 0.95 + 0.09;
@@ -4965,7 +4986,7 @@ function handleNet(msg, fromId){
       if (msg.k === 'plant'){
         GAME.spike.state = 'planted';
         GAME.spike.pos = V3(msg.x, groundYAt(V3(msg.x, 1, msg.z)), msg.z);
-        GAME.spike.timer = GAME.DETONATE;
+        setSpikeTimer(GAME.DETONATE);
         spikeMesh.root.position.copyFrom(GAME.spike.pos);
         spikeMesh.root.setEnabled(true);
         spikeLight.intensity = 6;
@@ -4987,7 +5008,9 @@ function handleNet(msg, fromId){
 /* clients mirror the host's world instead of simulating it */
 function applyWorld(m){
   const prevPhase = GAME.phase;
-  GAME.phase = m.ph; GAME.timer = m.tm; GAME.round = m.rd;
+  GAME.phase = m.ph; GAME.round = m.rd;
+  GAME.timer = m.tm;
+  GAME.timerEnd = performance.now() + m.tm * 1000;   /* re-anchor to the host */
   GAME.scoreAtk = m.sa; GAME.scoreDef = m.sd;
 
   if (m.sk){
@@ -5005,6 +5028,7 @@ function applyWorld(m){
       }
     }
     GAME.spike.timer = m.sk.t;
+    GAME.spike.endAt = performance.now() + m.sk.t * 1000;
   }
 
   /* reconcile the bot roster */
@@ -5120,7 +5144,7 @@ function beginNetMatch(asHost){
          world packet -- otherwise we sit at PHASE.MENU, which renders the
          map overview and skips the whole simulation branch. */
       GAME.phase = PHASE.BUY;
-      GAME.timer = GAME.BUY_TIME;
+      setPhaseTimer(GAME.BUY_TIME);
       GAME.ended = false;
       netRespawnLocal(); buildBuyMenu(); show('buy'); releasePointer();
     }
@@ -5158,7 +5182,7 @@ function netRespawnLocal(){
 /* 1v1: no rounds, no spike, respawn after a beat, first to the kill target. */
 function startDuel(asHost){
   GAME.phase = PHASE.ACTION;
-  GAME.timer = 0;
+  setPhaseTimer(0);
   GAME.spike.state = 'none';
   if (spikeMesh) spikeMesh.root.setEnabled(false);
   player.respawnT = 0;
