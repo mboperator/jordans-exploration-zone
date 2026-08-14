@@ -1125,7 +1125,7 @@ scene.activeCamera = menuCam;
 /* Sun: low and warm, the key that carves the hard-surface panels. */
 const sun = new BABYLON.DirectionalLight('sun', V3(-0.42, -0.78, 0.46), scene);
 sun.position = V3(48, 74, -52);
-sun.intensity = 1.15;
+sun.intensity = 1.70;
 sun.diffuse = C3('#ffd9a8');
 sun.specular = C3('#fff0d4');
 sun.shadowMinZ = 12; sun.shadowMaxZ = 190;
@@ -1133,7 +1133,7 @@ sun.shadowMinZ = 12; sun.shadowMaxZ = 190;
 /* Sky/bounce fill: warm from above, cool teal from the ground. This one pair
    does most of the Valorant "readable in every corner" heavy lifting.      */
 const sky = new BABYLON.HemisphericLight('sky', V3(0.1, 1, -0.15), scene);
-sky.intensity = 0.52;
+sky.intensity = 0.85;
 sky.diffuse = C3('#9fc4e8');
 sky.groundColor = C3('#2b4a55');
 sky.specular = C3('#7fa6c8');
@@ -1145,6 +1145,15 @@ siteLight.intensity = 0.0; siteLight.range = 34;
 const midLight = new BABYLON.PointLight('midL', V3(0, 5.6, 0), scene);
 midLight.diffuse = C3('#4fd8e8'); midLight.specular = C3('#8ff0ff');
 midLight.intensity = 0.0; midLight.range = 30;
+/* Both spawn rooms sit in the sun's shadow and carry no ceiling lamps, so
+   they need their own fill or you start the round unable to see. */
+const spawnFillA = new BABYLON.PointLight('spawnFillA', V3(0, 5.2, -27), scene);
+spawnFillA.diffuse = C3('#ffc36e'); spawnFillA.specular = C3('#ffd9a8');
+spawnFillA.intensity = 0.70; spawnFillA.range = 26;
+const spawnFillD = new BABYLON.PointLight('spawnFillD', V3(0, 5.2, 29), scene);
+spawnFillD.diffuse = C3('#8fd8ff'); spawnFillD.specular = C3('#c8ecff');
+spawnFillD.intensity = 0.70; spawnFillD.range = 26;
+
 /* A small light welded to the camera keeps the weapon readable indoors. */
 const gunLight = new BABYLON.PointLight('gunL', V3(0.25, 0.45, -0.35), scene);
 gunLight.parent = cam;
@@ -1212,7 +1221,7 @@ function buildPost(){
   const ip = pipeline.imageProcessing;
   ip.toneMappingEnabled = true;
   ip.toneMappingType = BABYLON.ImageProcessingConfiguration.TONEMAPPING_ACES;
-  ip.exposure = 1.05;
+  ip.exposure = 1.15;
   ip.contrast = 1.20;
   ip.vignetteEnabled = true;
   ip.vignetteWeight = 2.6;
@@ -1255,7 +1264,7 @@ function stdMat(name, o){
     });
     m.reflectionTexture.level = o.reflectLevel != null ? o.reflectLevel : 0.34;
   }
-  m.maxSimultaneousLights = 8;
+  m.maxSimultaneousLights = 10;
   m.freeze = () => m.freezeMaterial && m.freezeMaterial();
   return m;
 }
