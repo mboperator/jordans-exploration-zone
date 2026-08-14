@@ -4253,16 +4253,20 @@ let acc = 0, hudAcc = 0;
 /* Everything that advances the world, with no rendering in it. renderFrame
    drives this normally; the keep-alive below drives it when the tab is
    hidden and requestAnimationFrame has been stopped by the browser. */
-function stepGame(dt){
+function stepGame(dt, lite){
   const NM = NET.on ? MODES[NET.mode] : null;
   if (NM && !NM.rounds) duelTick(dt); else roundTick(dt);
   if (GAME.phase === PHASE.OVER) return;
   playerUpdate(dt);
-  if (!NET.on || NET.isHost) for (const b of bots) botUpdate(b, dt);
+  /* lite skips the expensive AI so a throttled tab can still keep the round
+     clock and the network in real time -- bots idle rather than the match
+     hanging for everyone */
+  if (!lite && (!NET.on || NET.isHost)) for (const b of bots) botUpdate(b, dt);
   updateRemotes(dt);
   netTick(dt);
   if (player.alive && GAME.phase === PHASE.ACTION && (!NM || NM.rounds)) interactTick(dt);
   else showPrompt(null);
+  if (lite) return;
   if (GAME.spike.state === 'dropped'){
     for (const b of bots){
       if (b.alive && b.team === GAME.attackers &&
@@ -4288,9 +4292,10 @@ setInterval(() => {
   if (!__kaLast){ __kaLast = now; return; }
   let elapsed = Math.min((now - __kaLast) / 1000, 2);
   __kaLast = now;
-  while (elapsed > 0.001){
-    const dt = Math.min(elapsed, 1 / 30);
-    try { stepGame(dt); } catch (e) { console.error('keepalive step', e); break; }
+  let guard = 40;                       /* bounded, so a long stall cannot spiral */
+  while (elapsed > 0.001 && guard-- > 0){
+    const dt = Math.min(elapsed, 1 / 20);
+    try { stepGame(dt, true); } catch (e) { console.error('keepalive step', e); break; }
     elapsed -= dt;
   }
 }, 250);
