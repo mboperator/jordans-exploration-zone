@@ -2769,6 +2769,10 @@ function botSetPos(bot, x, z){
   bot.pos.set(x, 0, z);
   bot.mesh.root.position.set(x, 0, z);
 }
+function addShadowCasters(root){
+  if (!shadowGen || !root) return;
+  for (const m of root.getChildMeshes()) shadowGen.addShadowCaster(m, false);
+}
 function dropShadowCasters(root){
   if (!shadowGen || !root) return;
   const map = shadowGen.getShadowMap();
@@ -4182,7 +4186,8 @@ function updateFov(){
 function reAddShadowCasters(){
   if (!shadowGen) return;
   for (const m of mapMeshes) shadowGen.addShadowCaster(m, false);
-  for (const b of bots) if (b.mesh) shadowGen.addShadowCaster(b.mesh.root, true);
+  for (const b of bots) if (b.mesh) addShadowCasters(b.mesh.root);
+  for (const r of remotes.values()) if (r.mesh) addShadowCasters(r.mesh.root);
 }
 
 /* ---------------------------------------------------------- menu buttons -- */
@@ -4333,6 +4338,7 @@ function renderFrame(){
   stepGame(dt);
 
   SFX.setListener(cam.position, player.yaw);
+
 
   /* HUD at 30Hz -- DOM writes are the expensive part, not the rendering */
   drawReticle();
@@ -4732,7 +4738,7 @@ function addRemote(netId, info){
     stepPhase: 0, speed: 0, dead: 0, spotted: 0, mesh: null,
   };
   r.mesh = buildBotMesh(r);
-  if (shadowGen) shadowGen.addShadowCaster(r.mesh.root, true);
+  addShadowCasters(r.mesh.root);
   remotes.set(netId, r);
   refreshTeamCards();
   return r;
@@ -4750,7 +4756,7 @@ function retintRemote(r, team){
   r.team = team;
   if (r.mesh){ dropShadowCasters(r.mesh.root); r.mesh.root.dispose(false, false); }
   r.mesh = buildBotMesh(r);
-  if (shadowGen) shadowGen.addShadowCaster(r.mesh.root, true);
+  addShadowCasters(r.mesh.root);
 }
 
 /* shared by remote operators and (on clients) host-driven bots */
