@@ -1,10 +1,21 @@
-# BREACH POINT
+# Jordan's Exploration Zone
 
-A round-based tactical shooter that runs in the browser. One HTML file — every
+Browser games that build themselves. Each one is a single HTML file — every
 texture, mesh, sound and animation is generated in code at load time. No art
 assets, no audio files, no build step.
 
 **Play:** https://mboperator.github.io/jordans-exploration-zone/
+
+| Game | What it is |
+|---|---|
+| [BREACH POINT](breach-point.html) | Round-based tactical shooter, 3v3, with P2P multiplayer |
+| [Krusty Krab Escape](krusty-krab-escape.html) | First-person survival-horror escape |
+
+---
+
+# BREACH POINT
+
+A round-based tactical shooter that runs in the browser.
 
 ## Controls
 
@@ -52,3 +63,54 @@ direct connection.
 
 [Babylon.js](https://www.babylonjs.com/) for rendering and
 [PeerJS](https://peerjs.com/) for the networking. Both from a CDN; nothing else.
+
+---
+
+# Krusty Krab Escape
+
+You are locked in the Krusty Krab after closing and SpongeBob is hunting you
+with a spatula. **One hit ends the run** — there are no hearts and no respawn.
+
+## Controls
+
+| | |
+|---|---|
+| Move | `W` `A` `S` `D` |
+| Look | Mouse (click the page to capture it) — arrow keys also turn |
+| Sprint | Hold `Shift` — costs stamina, and it's loud |
+| Crouch | `C` — slow and silent |
+| Interact | `E` — pick up, unlock, hammer, plank, work the safe, free Patrick |
+| Fire the bubble gun | Left mouse / `F` |
+| Hold a key | `1` `2` `3` `4` colour keys, `5` white key |
+| Tools | `6` hammer, `7` plank, `8` bubble gun |
+| Shop | `B` from the title |
+| Mute / restart | `M` / `R` |
+
+## The game
+
+Six zones behind colour-locked doors. Keys are **consumed** — one key, one door,
+and the padlock visibly breaks off. A hammer smashes boarded doorways, a single
+plank bridges two grease pits and can be pried back up, and Mr. Krabs' safe holds
+the **white key** behind a three-digit combination scattered across three notes
+and randomised every run.
+
+The white key doesn't open the exit. It frees **Patrick**, and the moment his
+chains hit the floor the front doors unbolt, the lights go red and SpongeBob goes
+permanently enraged. Then you hammer through four boards with him closing on you,
+and you don't leave without Patrick.
+
+The tension isn't the chase — SpongeBob is slower than you walk. It's that
+hammering, planking, working the dial and freeing Patrick all root you in place
+and make noise.
+
+## Escaping pays
+
+Every escape is worth 5 Krusty Bucks on any difficulty, saved to `localStorage`,
+spent in the shop on **36 skins** covering the cast. Your skin shows up in the
+corner badge, which walks when you walk.
+
+## Built with
+
+Nothing. It's a hand-written raycaster — DDA wall casting, a per-column z-buffer,
+box-model 3D characters on a forward-kinematics walk rig, procedural textures and
+a Web Audio synth. One file, no dependencies, no network calls.
