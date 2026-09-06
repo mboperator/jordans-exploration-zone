@@ -1,0 +1,1935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CROSS SECTION — a side-view Aperture testing initiative</title>
+<meta name="description" content="A 2D portal puzzler. Gels, excursion funnels, hard light bridges, discouragement beams — fourteen test chambers, each one fitting on a single screen.">
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #05080b; overflow: hidden;
+    font: 16px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #dfe6ec;
+  }
+  body { display: grid; place-items: center; }
+  canvas { display: block; touch-action: none; }
+  #boot {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: #05080b; z-index: 10; letter-spacing: .18em; font-size: .8rem;
+    color: #6d7c8a; text-transform: uppercase;
+  }
+  #boot.gone { display: none; }
+  #nosupport { display: none; padding: 2rem; max-width: 32rem; text-align: center; }
+</style>
+</head>
+<body>
+<div id="boot">Powering up the enrichment center…<span id="nosupport"></span></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js"></script>
+<script>
+"use strict";
+
+/* =========================================================================
+   CROSS SECTION
+   A 2D portal puzzler built on Phaser 3 (Arcade physics).
+   Every texture, character, sound and particle is generated in code at load.
+   The whole test chamber fits on one screen — the camera never moves.
+   ========================================================================= */
+
+/* ---------- world metrics -------------------------------------------------
+   The chamber is a fixed 40x23 grid of 32px tiles. That is deliberate: it is
+   the largest grid that still reads clearly when the entire chamber has to be
+   visible at once on a laptop screen. A HUD strip lives underneath it. */
+const T = 32, COLS = 40, ROWS = 23;
+const WW = COLS * T;           // 1280 — chamber width
+const WH = ROWS * T;           // 736  — chamber height
+const HUDH = 64;
+const GH = WH + HUDH;          // 800  — canvas height
+
+const GRAV = 2300;
+const PW = 18, PH = 34;        // player box: narrower than a tile, taller than one
+const CUBE = 24;
+const PORTAL_SPAN = 2 * T;     // apertures are exactly two tiles long
+const PORTAL_HALF = PORTAL_SPAN / 2;
+const VMAX = 1500;             // capped so nothing tunnels a 32px wall at 120Hz
+
+const DIRV = { r: [1, 0], l: [-1, 0], u: [0, -1], d: [0, 1] };
+
+/* palette — Aperture is white panels, dark structure, and two angry lights */
+const C = {
+  bg0: 0x0d151d, bg1: 0x22303c,
+  panel: 0xd7dee4, panelDark: 0xb9c4cc, panelLine: 0x9aa8b3,
+  wall: 0x53606b, wallHi: 0x6b7884, wallLo: 0x333d46,
+  glass: 0x8fd8e8, grate: 0x39424b,
+  goo: 0x9dd63b, gooDark: 0x3f6b17,
+  blue: 0x4bb4ff, orange: 0xff9b28,
+  gelBlue: 0x3d7cff, gelOrange: 0xff7a1a, gelWhite: 0xf2f6f8,
+  laser: 0xff3b3b, funnel: 0x8fdcff, bridge: 0xbfe8ff,
+  ink: 0xdfe6ec, dim: 0x6d7c8a,
+};
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const sgn = v => v < 0 ? -1 : v > 0 ? 1 : 0;
+/* move v toward target by at most step */
+const approach = (v, t, s) => v < t ? Math.min(v + s, t) : Math.max(v - s, t);
+
+/* ---------- a very small synth --------------------------------------------
+   No audio files. Everything is oscillators and one shared noise buffer. */
+const SFX = {
+  ac: null, on: true, nb: null,
+  ctx() {
+    if (!this.ac) {
+      try { this.ac = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { return null; }
+    }
+    if (this.ac.state === "suspended") this.ac.resume();
+    return this.ac;
+  },
+  noiseBuf() {
+    const a = this.ctx(); if (!a) return null;
+    if (!this.nb) {
+      const n = a.sampleRate * 0.7;
+      this.nb = a.createBuffer(1, n, a.sampleRate);
+      const d = this.nb.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    }
+    return this.nb;
+  },
+  tone(f, dur, o = {}) {
+    const a = this.ctx(); if (!a || !this.on) return;
+    const t = a.currentTime + (o.delay || 0);
+    const osc = a.createOscillator(), g = a.createGain();
+    osc.type = o.type || "sine";
+    osc.frequency.setValueAtTime(f, t);
+    if (o.to) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.to), t + dur);
+    const v = (o.v == null ? 0.14 : o.v);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(v, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(a.destination);
+    osc.start(t); osc.stop(t + dur + 0.03);
+  },
+  noise(dur, o = {}) {
+    const a = this.ctx(); if (!a || !this.on) return;
+    const buf = this.noiseBuf(); if (!buf) return;
+    const t = a.currentTime + (o.delay || 0);
+    const s = a.createBufferSource(); s.buffer = buf;
+    const f = a.createBiquadFilter();
+    f.type = o.type || "lowpass";
+    f.frequency.setValueAtTime(o.freq || 1400, t);
+    if (o.to) f.frequency.exponentialRampToValueAtTime(Math.max(60, o.to), t + dur);
+    const g = a.createGain();
+    const v = (o.v == null ? 0.16 : o.v);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(v, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f).connect(g).connect(a.destination);
+    s.start(t); s.stop(t + dur + 0.03);
+  },
+  /* a sustained hum, used for lasers and funnels while they are alive */
+  hum(key, freq, type) {
+    if (!this._h) this._h = {};
+    let h = this._h[key];
+    const a = this.ctx(); if (!a) return { set() {} };
+    if (!h) {
+      const osc = a.createOscillator(), g = a.createGain(), lp = a.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 900;
+      osc.type = type || "sawtooth"; osc.frequency.value = freq;
+      g.gain.value = 0.0001;
+      osc.connect(lp).connect(g).connect(a.destination);
+      osc.start();
+      h = this._h[key] = { g, osc };
+    }
+    return {
+      set: (v) => {
+        const now = a.currentTime;
+        h.g.gain.cancelScheduledValues(now);
+        h.g.gain.setTargetAtTime(this.on ? Math.max(0.00001, v) : 0.00001, now, 0.08);
+      }
+    };
+  },
+  shoot(blue) { this.tone(blue ? 640 : 480, 0.12, { type: "square", v: 0.07, to: blue ? 1500 : 1150 }); this.noise(0.09, { freq: 2600, to: 600, v: 0.05 }); },
+  openP(blue) { this.tone(blue ? 300 : 230, 0.42, { type: "sine", v: 0.1, to: blue ? 900 : 700 }); },
+  jump() { this.noise(0.09, { freq: 900, to: 300, v: 0.05 }); },
+  land(f) { this.noise(0.1, { freq: 500, to: 120, v: clamp(f, 0.02, 0.12) }); },
+  click(up) { this.tone(up ? 900 : 1300, 0.05, { type: "square", v: 0.06 }); this.tone(up ? 450 : 650, 0.09, { type: "triangle", v: 0.05 }); },
+  door() { this.noise(0.5, { freq: 300, to: 900, v: 0.05 }); this.tone(90, 0.5, { type: "sawtooth", v: 0.04, to: 150 }); },
+  fizz() { this.noise(0.35, { freq: 5000, to: 400, v: 0.13 }); this.tone(1200, 0.3, { type: "square", v: 0.05, to: 90 }); },
+  bounce() { this.tone(220, 0.16, { type: "sine", v: 0.13, to: 620 }); },
+  splat() { this.noise(0.14, { freq: 1100, to: 220, v: 0.08 }); },
+  die() { this.tone(300, 0.6, { type: "sawtooth", v: 0.12, to: 40 }); this.noise(0.5, { freq: 900, to: 80, v: 0.1 }); },
+  win() { [523, 659, 784, 1046].forEach((f, i) => this.tone(f, 0.32, { type: "triangle", v: 0.1, delay: i * 0.1 })); },
+  pick() { this.tone(700, 0.06, { type: "square", v: 0.05 }); },
+  shot() { this.noise(0.06, { freq: 3000, to: 800, v: 0.07 }); },
+  plate() { this.tone(160, 0.3, { type: "square", v: 0.09, to: 700 }); },
+};
+
+/* ---------- procedural textures ------------------------------------------- */
+function makeTex(scene, key, w, h, draw) {
+  if (scene.textures.exists(key)) return;
+  const cv = scene.textures.createCanvas(key, w, h);
+  draw(cv.getContext(), w, h);
+  cv.refresh();
+}
+function hex(n) { return "#" + n.toString(16).padStart(6, "0"); }
+
+function buildTextures(scene) {
+  /* white portal-conductive panel: the surface the whole game is about */
+  makeTex(scene, "t_panel", T, T, (g) => {
+    g.fillStyle = hex(C.panel); g.fillRect(0, 0, T, T);
+    const grd = g.createLinearGradient(0, 0, 0, T);
+    grd.addColorStop(0, "rgba(255,255,255,0.55)");
+    grd.addColorStop(1, "rgba(120,140,155,0.30)");
+    g.fillStyle = grd; g.fillRect(0, 0, T, T);
+    g.strokeStyle = "rgba(120,138,152,0.55)"; g.lineWidth = 1;
+    g.strokeRect(1.5, 1.5, T - 3, T - 3);
+    g.fillStyle = "rgba(255,255,255,0.5)";
+    g.fillRect(2, 2, T - 4, 1);
+    g.fillStyle = "rgba(90,108,122,0.35)";
+    g.fillRect(2, T - 3, T - 4, 1);
+    /* four corner screws, the Aperture signature */
+    g.fillStyle = "rgba(110,128,142,0.75)";
+    [[5, 5], [T - 5, 5], [5, T - 5], [T - 5, T - 5]].forEach(([x, y]) => {
+      g.beginPath(); g.arc(x, y, 1.5, 0, 7); g.fill();
+    });
+  });
+  /* dark structural panel — nothing sticks to this */
+  makeTex(scene, "t_wall", T, T, (g) => {
+    g.fillStyle = hex(C.wall); g.fillRect(0, 0, T, T);
+    const grd = g.createLinearGradient(0, 0, 0, T);
+    grd.addColorStop(0, "rgba(255,255,255,0.20)");
+    grd.addColorStop(1, "rgba(0,0,0,0.22)");
+    g.fillStyle = grd; g.fillRect(0, 0, T, T);
+    g.strokeStyle = "rgba(0,0,0,0.40)"; g.lineWidth = 1;
+    g.strokeRect(0.5, 0.5, T - 1, T - 1);
+    g.strokeStyle = "rgba(255,255,255,0.16)";
+    g.beginPath(); g.moveTo(1, 1); g.lineTo(T - 1, 1); g.stroke();
+    g.fillStyle = "rgba(255,255,255,0.08)";
+    g.fillRect(6, 6, T - 12, T - 12);
+    g.fillStyle = "rgba(0,0,0,0.18)";
+    g.fillRect(6, T - 8, T - 12, 2);
+  });
+  makeTex(scene, "t_glass", T, T, (g) => {
+    g.fillStyle = "rgba(143,216,232,0.16)"; g.fillRect(0, 0, T, T);
+    g.strokeStyle = "rgba(180,240,255,0.30)"; g.lineWidth = 1;
+    g.strokeRect(0.5, 0.5, T - 1, T - 1);
+    g.strokeStyle = "rgba(255,255,255,0.22)";
+    g.beginPath(); g.moveTo(0, T); g.lineTo(T, 0); g.stroke();
+  });
+  makeTex(scene, "t_grate", T, T, (g) => {
+    g.fillStyle = hex(C.grate); g.fillRect(0, 0, T, T);
+    g.strokeStyle = "rgba(0,0,0,0.55)"; g.lineWidth = 2;
+    for (let i = 4; i < T; i += 8) {
+      g.beginPath(); g.moveTo(i, 0); g.lineTo(i, T); g.stroke();
+      g.beginPath(); g.moveTo(0, i); g.lineTo(T, i); g.stroke();
+    }
+    g.strokeStyle = "rgba(255,255,255,0.07)"; g.lineWidth = 1;
+    g.strokeRect(0.5, 0.5, T - 1, T - 1);
+  });
+  makeTex(scene, "t_goo", T, T, (g) => {
+    g.fillStyle = hex(C.gooDark); g.fillRect(0, 0, T, T);
+    const grd = g.createLinearGradient(0, 0, 0, T);
+    grd.addColorStop(0, "rgba(157,214,59,0.85)");
+    grd.addColorStop(1, "rgba(35,60,12,0.9)");
+    g.fillStyle = grd; g.fillRect(0, 0, T, T);
+    for (let i = 0; i < 8; i++) {
+      g.fillStyle = "rgba(200,255,120,0.10)";
+      g.beginPath(); g.arc(Math.random() * T, Math.random() * T, 1 + Math.random() * 3, 0, 7); g.fill();
+    }
+  });
+  /* a soft radial dot, reused for every glow and particle in the game */
+  makeTex(scene, "t_glow", 64, 64, (g, w) => {
+    const grd = g.createRadialGradient(w / 2, w / 2, 0, w / 2, w / 2, w / 2);
+    grd.addColorStop(0, "rgba(255,255,255,1)");
+    grd.addColorStop(0.35, "rgba(255,255,255,0.45)");
+    grd.addColorStop(1, "rgba(255,255,255,0)");
+    g.fillStyle = grd; g.fillRect(0, 0, w, w);
+  });
+  makeTex(scene, "t_spark", 8, 8, (g) => {
+    g.fillStyle = "#ffffff";
+    g.beginPath(); g.arc(4, 4, 3, 0, 7); g.fill();
+  });
+}
+
+/* =========================================================================
+   THE TEST CHAMBERS
+   Each chamber is a list of rectangles painted over an empty bordered room,
+   plus a list of objects. Tile chars: '#' structure (nothing sticks to it),
+   'W' portal-conductive white panel, 'G' glass, '=' grating, '~' toxic goo.
+   Coordinates are tile coordinates. `spawn`/`exit` take the FLOOR row the
+   thing stands on. Every trajectory below has been worked out against the
+   real gravity constant — the flings land where the chamber says they do.
+   ========================================================================= */
+const LEVELS = [
+{
+  name: "CALIBRATION", sub: "Portals have been provided for you. Please do not thank us.",
+  gun: 0, spawn: [3, 17], exit: [34, 17],
+  tiles: [
+    [1, 17, 38, 1, "#"], [1, 18, 38, 4, "#"],   // floor and the solid mass beneath it
+    [24, 17, 4, 5, " "],                        // a pit, four tiles wide
+    [13, 5, 2, 12, "W"],                        // the divider you cannot climb
+    [20, 8, 2, 6, "W"],                         // floating block: the far side of the fling
+  ],
+  pre: [
+    { a: [13, 15, "l"], b: [14, 15, "r"] },     // straight through the divider
+    { a: [26, 22, "u"], b: [21, 12, "r"] },     // pit floor -> ledge face: speed is kept
+  ],
+  obj: [],
+},
+{
+  name: "APERTURE", sub: "One portal is yours. The other was installed by someone with a budget.",
+  gun: 1, spawn: [5, 17], exit: [36, 17],
+  tiles: [
+    [1, 17, 38, 1, "#"], [1, 18, 38, 4, "#"],
+    [14, 17, 13, 5, "~"],                       // the chamber's opinion of failure
+    [0, 13, 1, 4, "W"],                         // left wall, at head height
+    [2, 0, 10, 1, "W"],                         // and the ceiling above the start
+    [31, 0, 5, 1, "W"],                         // ceiling over the far platform
+  ],
+  fixed: { c: "o", tx: 32, ty: 0, dir: "d" },   // the pre-installed exit aperture
+  obj: [],
+},
+{
+  name: "DUAL APERTURE", sub: "Both apertures are now yours. Try not to place them in each other.",
+  gun: 2, spawn: [4, 20], exit: [32, 10],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [4, 20, 6, 1, "W"],                         // conductive floor by the entry
+    [26, 1, 12, 1, "W"],                        // conductive ceiling over the pillar
+    [30, 10, 4, 10, "#"],                       // the pillar itself: nothing sticks to it
+  ],
+  obj: [],
+},
+{
+  name: "WEIGHTED STORAGE", sub: "The cube will not threaten you. That is the difference between you and the cube.",
+  gun: 2, spawn: [4, 20], exit: [36, 20],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [3, 20, 8, 1, "W"],
+    [3, 1, 8, 1, "W"], [21, 1, 8, 1, "W"],
+    [21, 12, 7, 1, "#"],                        // the shelf the cube sits on
+    [33, 1, 1, 17, "#"],                        // wall sealing the exit alcove
+  ],
+  obj: [
+    { t: "cube", x: 24, y: 11 },
+    { t: "btn", x: 14, y: 20, ch: "a" },
+    { t: "door", x: 33, y: 18, w: 1, h: 2, ch: "a" },
+  ],
+},
+{
+  name: "MOMENTUM", sub: "Speedy thing goes in. Speedy thing comes out. That is the whole science.",
+  gun: 2, spawn: [36, 5], exit: [3, 20],
+  tiles: [
+    [33, 5, 6, 1, "#"],                         // the drop ledge
+    [39, 1, 1, 4, "W"],                         // conductive strip above it — aim here first
+    [20, 20, 19, 1, "W"], [20, 21, 19, 1, "#"], // the whole landing floor is conductive
+    [8, 20, 12, 2, "~"],                        // twelve tiles of goo
+    [1, 20, 7, 1, "#"], [1, 21, 7, 1, "#"],     // the far platform, reachable only at speed
+    [36, 17, 3, 1, "#"], [32, 14, 3, 1, "#"],   // stairs back up, hugging the wall so they
+    [36, 11, 3, 1, "#"], [32, 8, 3, 1, "#"],    // never sit in the flight path
+  ],
+  obj: [],
+},
+{
+  name: "SIGNAL DELAY", sub: "The hatch is on a timer. The timer is not negotiable. The timer is a friend.",
+  gun: 2, spawn: [2, 20], exit: [35, 10],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [10, 20, 8, 1, "W"],                        // where you fall in
+    [28, 20, 2, 1, "W"],                        // where you come back out, going up
+    [6, 17, 4, 1, "#"], [1, 14, 4, 1, "#"],     // the climb to the pedestal
+    [6, 11, 4, 1, "#"], [1, 8, 4, 1, "#"], [6, 5, 4, 1, "#"],
+    [22, 12, 5, 1, "#"], [31, 12, 2, 1, "#"],   // ceiling slab — the hatch gap is 27..30
+    [31, 10, 8, 1, "#"],                        // exit platform
+  ],
+  obj: [
+    { t: "ped", x: 8, y: 5, ch: "a", time: 2.6 },
+    { t: "door", x: 27, y: 12, w: 4, h: 1, ch: "a" },
+  ],
+},
+{
+  name: "AERIAL FAITH PLATE", sub: "The plate is safe. The landing is a separate department.",
+  gun: 2, spawn: [2, 20], exit: [36, 12],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [20, 20, 12, 2, "~"],
+    [1, 17, 3, 1, "#"], [4, 14, 5, 1, "#"],     // steps up to the plate
+    [18, 6, 2, 6, "#"], [18, 7, 1, 4, "W"],     // the block you meet at the top of the arc
+    [33, 1, 5, 1, "W"],                         // conductive ceiling over the exit ledge
+    [32, 12, 7, 1, "#"],                        // exit ledge
+  ],
+  obj: [
+    { t: "plate", x: 6, y: 14, vx: 980, vy: -880 },
+  ],
+},
+{
+  name: "EXCURSION FUNNEL", sub: "Do not fight the funnel. The funnel has never lost.",
+  gun: 2, spawn: [3, 20], exit: [36, 20],
+  tiles: [
+    [1, 20, 12, 1, "#"], [1, 21, 12, 1, "#"],
+    [13, 20, 18, 2, "~"],
+    [31, 20, 8, 1, "#"], [31, 21, 8, 1, "#"],
+    [20, 12, 2, 8, "#"], [20, 15, 1, 2, "W"],   // the wall the funnel dead-ends against
+    [32, 1, 5, 1, "W"],                         // conductive ceiling over the far side
+  ],
+  obj: [
+    { t: "funnel", x: 1, y: 15, d: "r" },
+  ],
+},
+{
+  name: "HARD LIGHT BRIDGE", sub: "The bridge is made of light. Light is famously load-bearing.",
+  gun: 2, spawn: [4, 20], exit: [36, 20],
+  tiles: [
+    [1, 20, 10, 1, "#"], [1, 21, 10, 1, "#"],
+    [11, 20, 18, 2, "~"],                       // eighteen tiles of goo
+    [29, 20, 10, 1, "#"], [29, 21, 10, 1, "#"],
+    [7, 17, 4, 1, "#"],                         // step up, so you can board the bridge
+    [1, 0, 5, 1, "W"],                          // conductive ceiling above the emitter
+    [39, 15, 1, 4, "W"],                        // conductive strip on the far wall
+  ],
+  obj: [
+    { t: "bridge", x: 2, y: 19, d: "u" },       // fires straight up — a wall until you move it
+    { t: "turret", x: 33, y: 20, f: -1 },
+  ],
+},
+{
+  name: "DISCOURAGEMENT BEAM", sub: "The beam discourages. Historically it has been very persuasive.",
+  gun: 2, spawn: [2, 20], exit: [36, 20],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [1, 17, 3, 1, "#"], [1, 14, 3, 1, "#"],     // steps up to the mirror's shelf
+    [3, 12, 4, 1, "#"],                         // the shelf, in the beam's path
+    [20, 8, 2, 8, "#"], [20, 10, 1, 4, "W"],    // hanging wall the beam stops against
+    [31, 1, 4, 1, "W"],                         // conductive ceiling on the far side
+    [34, 14, 1, 4, "#"],                        // exit alcove wall
+  ],
+  obj: [
+    { t: "laser", x: 5, y: 1, d: "d" },
+    { t: "disp", x: 9, y: 18, kind: "redirect" },
+    { t: "fizz", x: 27, y: 12, h: 8 },
+    { t: "catcher", x: 32, y: 19, d: "u", ch: "c", latch: true },
+    { t: "door", x: 34, y: 18, w: 1, h: 2, ch: "c" },
+  ],
+},
+{
+  name: "REPULSION GEL", sub: "The blue gel is not edible. We are told this is now on the sign.",
+  gun: 2, spawn: [2, 20], exit: [35, 8],
+  tiles: [
+    [1, 20, 38, 1, "#"], [1, 21, 38, 1, "#"],
+    [4, 20, 4, 1, "W"],
+    [25, 1, 4, 1, "W"],                         // stops short of the ledge on purpose
+    [30, 8, 9, 1, "#"],
+  ],
+  obj: [
+    { t: "drop", x: 6, y: 1, gel: "blue" },
+  ],
+},
+{
+  name: "PROPULSION GEL", sub: "The orange gel makes you fast. It does not make you good at stopping.",
+  gun: 2, spawn: [2, 20], exit: [36, 20],
+  tiles: [
+    [1, 20, 22, 1, "#"], [1, 21, 22, 1, "#"],
+    [23, 20, 8, 2, "~"],
+    [31, 20, 8, 1, "#"], [31, 21, 8, 1, "#"],
+    [3, 20, 4, 1, "W"],
+    [12, 1, 7, 1, "W"],
+  ],
+  obj: [
+    { t: "drop", x: 4, y: 1, gel: "orange" },
+  ],
+},
+{
+  name: "CONVERSION GEL", sub: "White gel makes any surface conductive. Yes. Any. We checked twice.",
+  gun: 2, spawn: [2, 10], exit: [35, 5],
+  tiles: [
+    [1, 10, 38, 1, "#"], [1, 11, 38, 11, "#"],  // a high floor over solid rock
+    [4, 10, 4, 12, " "],                        // a shaft cut down through it
+    [4, 21, 4, 1, "W"],                         // conductive floor at the bottom
+    [30, 5, 9, 1, "#"],                         // exit ledge, five tiles out of reach
+  ],
+  obj: [
+    { t: "drop", x: 28, y: 1, gel: "white", ch: "a" },
+    { t: "btn", x: 12, y: 10, ch: "a" },
+    { t: "disp", x: 18, y: 7 },
+  ],
+},
+{
+  name: "FINAL EXAM", sub: "Beam, bridge, gel, turret. The catcher latches — you will need your apertures back.",
+  gun: 2, spawn: [2, 20], exit: [35, 8],
+  tiles: [
+    [1, 20, 12, 1, "#"], [1, 21, 12, 1, "#"],
+    [13, 20, 14, 2, "~"],                       // fourteen tiles of goo
+    [27, 20, 12, 1, "#"], [27, 21, 12, 1, "#"],
+    [4, 20, 4, 1, "W"],                         // where the blue gel lands to begin with
+    [20, 1, 2, 3, "#"], [20, 2, 1, 2, "W"],     // the block the beam dead-ends against
+    [39, 9, 1, 2, "W"],                         // conductive strip beside the catcher
+    [28, 1, 4, 1, "W"],                         // conductive ceiling over the far floor
+    [32, 8, 7, 1, "#"],                         // exit ledge, out of reach without gel
+  ],
+  obj: [
+    { t: "drop", x: 5, y: 1, gel: "blue" },
+    { t: "laser", x: 1, y: 2, d: "r" },
+    { t: "catcher", x: 34, y: 10, d: "r", ch: "x", latch: true },
+    { t: "bridge", x: 12, y: 18, d: "r", ch: "x" },
+    { t: "turret", x: 30, y: 20, f: -1 },
+  ],
+},
+];
+
+/* ---------- progress ------------------------------------------------------ */
+const SAVE = {
+  key: "crosssection.v1",
+  data: { unlocked: 1, best: {} },
+  load() { try { const s = JSON.parse(localStorage.getItem(this.key)); if (s) Object.assign(this.data, s); } catch (e) {} },
+  save() { try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) {} },
+};
+SAVE.load();
+
+const SOLID = { "#": 1, "W": 1, "G": 1, "=": 1 };
+
+/* =========================================================================
+   GAME SCENE
+   ========================================================================= */
+class Game extends Phaser.Scene {
+  constructor() { super("Game"); }
+  init(d) { this.idx = d.idx | 0; }
+
+  create() {
+    const L = this.L = LEVELS[this.idx];
+    this.chamberTime = 0;
+    this.dead = false; this.won = false; this.fade = 0;
+    this.portals = []; this.sig = new Set(); this.latched = new Set();
+    this.pB = this.pO = null;   // scene instances are reused — never inherit last chamber's apertures
+    this.blobs = []; this.bullets = []; this.cubes = [];
+    this.gelDirty = true;
+    this.hudA = null;   // scene instances are reused across restarts; its text objects are not
+
+    this.physics.world.setBounds(0, 0, WW, WH);
+    this.buildGrid(L);
+    this.buildTileBodies();
+
+    /* ---- draw layers. The static level is baked once into a render texture;
+       everything that moves is redrawn each frame with vector graphics. ---- */
+    this.bg = this.add.graphics().setDepth(0);
+    this.rt = this.add.renderTexture(0, 0, WW, WH).setOrigin(0, 0).setDepth(1);
+    this.gfxGel = this.add.graphics().setDepth(2);
+    this.gfxBeam = this.add.graphics().setDepth(3);
+    this.gfxObj = this.add.graphics().setDepth(4);
+    this.gfxActor = this.add.graphics().setDepth(6);
+    this.gfxPortal = this.add.graphics().setDepth(7);
+    this.gfxHud = this.add.graphics().setDepth(20);
+    this.paintBackground();
+    this.paintLevel();
+
+    this.solidGroup = this.physics.add.staticGroup();
+    this.buildObjects(L);
+
+    /* ---- the player ---- */
+    const sp = L.spawn;
+    this.player = this.mkBody(sp[0] * T + T / 2, sp[1] * T - PH / 2, PW, PH);
+    this.player.body.setMaxVelocity(VMAX, VMAX);
+    this.player.body.setCollideWorldBounds(true);
+    this.player.walk = 0; this.player.face = 1; this.player.hold = null;
+    this.player.coyote = 0; this.player.buffer = 0; this.player.wasDown = true;
+
+    this.physics.add.collider(this.player, this.tileGroup);
+    this.physics.add.collider(this.player, this.solidGroup);
+    this.physics.add.collider(this.cubeGroup, this.tileGroup);
+    this.physics.add.collider(this.cubeGroup, this.solidGroup);
+    this.physics.add.collider(this.cubeGroup, this.cubeGroup);
+    this.physics.add.collider(this.player, this.cubeGroup);
+    this.physics.add.collider(this.blobGroup, this.tileGroup);
+    this.physics.add.collider(this.blobGroup, this.solidGroup);
+    this.physics.add.collider(this.bulletGroup, this.tileGroup);
+    this.physics.add.collider(this.bulletGroup, this.solidGroup);
+
+    /* pre-installed portals, and the fixed half of a one-portal gun */
+    for (const pr of (L.pre || [])) {
+      const a = this.makePortal("static", pr.a[0], pr.a[1], pr.a[2]);
+      const b = this.makePortal("static", pr.b[0], pr.b[1], pr.b[2]);
+      if (a && b) { a.link = b; b.link = a; a.t = b.t = 1; }
+    }
+    if (L.fixed) {
+      const f = this.makePortal(L.fixed.c, L.fixed.tx, L.fixed.ty, L.fixed.dir);
+      if (f) { f.t = 1; this[L.fixed.c === "o" ? "pO" : "pB"] = f; }
+    }
+    this.refreshApertures();
+
+    this.setupInput();
+
+    /* the chamber name plate, then it gets out of the way */
+    this.banner = this.add.container(WW / 2, 150).setDepth(30);
+    const bt = this.add.text(0, 0, `TEST CHAMBER ${String(this.idx + 1).padStart(2, "0")}`,
+      { fontFamily: "ui-monospace, Menlo, monospace", fontSize: "34px", color: "#eef4f8" }).setOrigin(0.5);
+    const bs = this.add.text(0, 40, L.name, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: "20px", color: "#4bb4ff" }).setOrigin(0.5);
+    const bq = this.add.text(0, 78, L.sub, { fontFamily: "ui-monospace, Menlo, monospace", fontSize: "13px", color: "#7d8b98", wordWrap: { width: 620 }, align: "center" }).setOrigin(0.5);
+    this.banner.add([bt, bs, bq]);
+    this.tweens.add({ targets: this.banner, alpha: { from: 0, to: 1 }, duration: 400 });
+    this.tweens.add({ targets: this.banner, alpha: 0, delay: 3200, duration: 700 });
+
+    this.cameras.main.fadeIn(260, 5, 8, 11);
+
+    /* teleport is checked on the physics step, not the render frame, so a
+       1500px/s fling can never step over a 64px aperture */
+    this.stepHandler = () => this.portalStep();
+    this.physics.world.on("worldstep", this.stepHandler);
+    this.events.once("shutdown", () => {
+      /* the physics plugin may already have torn the world down by now */
+      if (this.physics && this.physics.world) this.physics.world.off("worldstep", this.stepHandler);
+      SFX.hum("laser", 60).set(0); SFX.hum("funnel", 90).set(0);
+    });
+  }
+
+  /* ---------- grid ---------- */
+  buildGrid(L) {
+    this.grid = []; this.gel = [];
+    for (let y = 0; y < ROWS; y++) {
+      const r = [], g = [];
+      for (let x = 0; x < COLS; x++) {
+        r.push((x === 0 || y === 0 || x === COLS - 1 || y === ROWS - 1) ? "#" : " ");
+        g.push(0);
+      }
+      this.grid.push(r); this.gel.push(g);
+    }
+    for (const [x, y, w, h, c] of (L.tiles || [])) {
+      for (let ty = y; ty < y + h; ty++) for (let tx = x; tx < x + w; tx++) {
+        if (tx >= 0 && ty >= 0 && tx < COLS && ty < ROWS) this.grid[ty][tx] = c;
+      }
+    }
+  }
+  inb(x, y) { return x >= 0 && y >= 0 && x < COLS && y < ROWS; }
+  ch(x, y) { return this.inb(x, y) ? this.grid[y][x] : "#"; }
+  isSolidTile(x, y) { return !!SOLID[this.ch(x, y)]; }
+  isGoo(x, y) { return this.ch(x, y) === "~"; }
+  /* white panels take portals; so does anything painted with conversion gel */
+  isConductive(x, y) {
+    const c = this.ch(x, y);
+    if (!SOLID[c] || c === "G") return false;
+    return c === "W" || this.gel[y][x] === 3;
+  }
+  exposed(x, y) {
+    return !this.isSolidTile(x - 1, y) || !this.isSolidTile(x + 1, y) ||
+           !this.isSolidTile(x, y - 1) || !this.isSolidTile(x, y + 1);
+  }
+
+  buildTileBodies() {
+    this.tileGroup = this.physics.add.staticGroup();
+    this.cubeGroup = this.physics.add.group();
+    this.blobGroup = this.physics.add.group();
+    this.bulletGroup = this.physics.add.group();
+    this.tileBody = {};
+    /* only surfaces get bodies — the rock in the middle of a wall is never touched */
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (!this.isSolidTile(x, y) || !this.exposed(x, y)) continue;
+      const z = this.add.zone(x * T + T / 2, y * T + T / 2, T, T);
+      this.tileGroup.add(z);
+      z.body.updateFromGameObject();
+      this.tileBody[y * COLS + x] = z;
+    }
+  }
+  mkBody(x, y, w, h) {
+    const z = this.add.zone(x, y, w, h);
+    this.physics.add.existing(z);
+    z.body.setSize(w, h);
+    return z;
+  }
+
+  /* =======================================================================
+     PORTALS
+     A portal is a plane: a centre, an outward normal, a tangent, and a
+     64px aperture. Crossing the plane inside the aperture moves you to the
+     partner and rotates your velocity into its frame — which is why speed
+     survives the trip and direction does not.
+     ======================================================================= */
+  makePortal(color, tx, ty, dir) {
+    const [nx, ny] = DIRV[dir];
+    const tiles = ny === 0 ? [[tx, ty], [tx, ty + 1]] : [[tx, ty], [tx + 1, ty]];
+    const p = {
+      color, nx, ny, ux: -ny, uy: nx, tiles, t: 0, link: null, back: null,
+      cx: ny === 0 ? (nx > 0 ? tx + 1 : tx) * T : (tiles[0][0] + 1) * T,
+      cy: ny === 0 ? (tiles[0][1] + 1) * T : (ny > 0 ? ty + 1 : ty) * T,
+    };
+    this.portals.push(p);
+    return p;
+  }
+  spanOK(color, tiles, nx, ny) {
+    for (const [tx, ty] of tiles) {
+      if (!this.isConductive(tx, ty)) return false;
+      if (this.isSolidTile(tx + nx, ty + ny)) return false;       // aperture must open into air
+      for (const q of this.portals) {
+        if (q.color === color) continue;                           // replacing our own is fine
+        for (const [qx, qy] of q.tiles) if (qx === tx && qy === ty) return false;
+      }
+    }
+    return true;
+  }
+  shootPortal(color) {
+    if (this.dead || this.won || !this.L.gun) return;
+    if (color === "o" && this.L.gun < 2) return;
+    const p = this.player;
+    const ang = Math.atan2(this.aimY - p.y, this.aimX - p.x);
+    const dx = Math.cos(ang), dy = Math.sin(ang);
+    let x = p.x, y = p.y;
+    SFX.shoot(color === "b");
+    this.gunFlash = 1; this.gunAng = ang;
+    for (let i = 0; i < 1400; i++) {
+      const ax = x + dx * 3, ay = y + dy * 3;
+      if (ax < 0 || ay < 0 || ax >= WW || ay >= WH) break;
+      if (this.fizzAt(ax, ay)) { this.portalFizz(ax, ay); return; }
+      const tx = Math.floor(ax / T), ty = Math.floor(ay / T);
+      if (this.isSolidTile(tx, ty)) {
+        const px = Math.floor(x / T), py = Math.floor(y / T);
+        let nx = 0, ny = 0;
+        if (px !== tx && !this.isSolidTile(px, ty)) nx = Math.sign(px - tx);
+        else if (py !== ty) ny = Math.sign(py - ty);
+        else if (px !== tx) nx = Math.sign(px - tx);
+        else break;
+        this.placePortal(color, tx, ty, nx, ny, ax, ay);
+        return;
+      }
+      x = ax; y = ay;
+    }
+    this.portalFizz(x, y);
+  }
+  placePortal(color, tx, ty, nx, ny, hx, hy) {
+    let cands;
+    if (ny === 0) {
+      const up = (hy - ty * T) / T < 0.5;
+      cands = up ? [[[tx, ty - 1], [tx, ty]], [[tx, ty], [tx, ty + 1]]]
+                 : [[[tx, ty], [tx, ty + 1]], [[tx, ty - 1], [tx, ty]]];
+    } else {
+      const left = (hx - tx * T) / T < 0.5;
+      cands = left ? [[[tx - 1, ty], [tx, ty]], [[tx, ty], [tx + 1, ty]]]
+                   : [[[tx, ty], [tx + 1, ty]], [[tx - 1, ty], [tx, ty]]];
+    }
+    for (const tiles of cands) {
+      if (!this.spanOK(color, tiles, nx, ny)) continue;
+      const dir = nx > 0 ? "r" : nx < 0 ? "l" : ny > 0 ? "d" : "u";
+      const old = color === "b" ? this.pB : this.pO;
+      if (old) this.dropPortal(old);
+      const p = this.makePortal(color, tiles[0][0], tiles[0][1], dir);
+      if (color === "b") this.pB = p; else this.pO = p;
+      const other = color === "b" ? this.pO : this.pB;
+      if (other) { p.link = other; other.link = p; }
+      this.refreshApertures();
+      SFX.openP(color === "b");
+      this.puff(p.cx + p.nx * 6, p.cy + p.ny * 6, color === "b" ? C.blue : C.orange, 12);
+      return;
+    }
+    this.portalFizz(hx, hy);
+  }
+  dropPortal(p) {
+    const i = this.portals.indexOf(p);
+    if (i >= 0) this.portals.splice(i, 1);
+    if (p.back) { p.back.destroy(); p.back = null; }
+    if (p.link) p.link.link = null;
+    if (this.pB === p) this.pB = null;
+    if (this.pO === p) this.pO = null;
+  }
+  clearGunPortals(quiet) {
+    let any = false;
+    if (this.pB) { this.puff(this.pB.cx, this.pB.cy, C.blue, 10); this.dropPortal(this.pB); any = true; }
+    if (this.pO) { this.puff(this.pO.cx, this.pO.cy, C.orange, 10); this.dropPortal(this.pO); any = true; }
+    if (any) { this.refreshApertures(); if (!quiet) SFX.fizz(); }
+  }
+  /* carve the aperture out of the wall, and seal its back so the wall still
+     works from the other side */
+  refreshApertures() {
+    for (const k in this.tileBody) this.tileBody[k].body.enable = true;
+    for (const p of this.portals) {
+      /* an aperture with nowhere to go is just a decal — it must not be a hole */
+      if (!p.link) { if (p.back) p.back.body.enable = false; continue; }
+      for (const [tx, ty] of p.tiles) {
+        const b = this.tileBody[ty * COLS + tx];
+        if (b) b.body.enable = false;
+      }
+      if (!p.back) {
+        p.back = this.add.zone(0, 0, 8, 8);
+        this.solidGroup.add(p.back);
+      }
+      const bx = p.cx - p.nx * (T - 4), by = p.cy - p.ny * (T - 4);
+      const w = p.ny === 0 ? 8 : PORTAL_SPAN, h = p.ny === 0 ? PORTAL_SPAN : 8;
+      p.back.setPosition(bx, by).setSize(w, h);
+      p.back.body.setSize(w, h);
+      p.back.body.updateFromGameObject();
+      p.back.body.enable = true;
+      /* One-way: the seal stops anything arriving from BEHIND the wall, but must
+         not catch a body on its way into the aperture — at 1500px/s a falling
+         body reaches the seal in the same physics step it crosses the plane. */
+      const cc = p.back.body.checkCollision;
+      cc.none = false;
+      cc.up = p.ny !== -1; cc.down = p.ny !== 1;
+      cc.left = p.nx !== -1; cc.right = p.nx !== 1;
+    }
+  }
+  portalFizz(x, y) { SFX.tone(180, 0.14, { type: "square", v: 0.05, to: 70 }); this.puff(x, y, 0x8899aa, 6); }
+
+  /* run on every physics step so nothing can outrun an aperture */
+  portalStep() {
+    if (this.player) { this.portalAssist(this.player); this.tryTeleport(this.player); }
+    for (const c of this.cubes) if (c.active) { if (!c.held) { this.portalAssist(c); this.tryTeleport(c); } }
+    for (const b of this.blobs) this.tryTeleport(b);
+    for (const b of this.bullets) this.tryTeleport(b);
+  }
+  /* Slide a body that is nearly lined up with an aperture the rest of the way
+     in. Without this a single pixel of overlap with the panel beside the hole
+     bounces you off a portal you were obviously aiming for. */
+  portalAssist(o) {
+    const b = o.body; if (!b || !b.enable) return;
+    for (const p of this.portals) {
+      if (!p.link || p.t < 0.9) continue;
+      const cx = b.position.x + b.halfWidth, cy = b.position.y + b.halfHeight;
+      const d = (cx - p.cx) * p.nx + (cy - p.cy) * p.ny;
+      if (d < 0 || d > 34) continue;
+      if (-(b.velocity.x * p.nx + b.velocity.y * p.ny) < 40) continue;   // must be heading in
+      const across = (cx - p.cx) * p.ux + (cy - p.cy) * p.uy;
+      if (Math.abs(across) > PORTAL_HALF) continue;
+      const he = Math.abs(p.ux) > 0.5 ? b.halfWidth : b.halfHeight;
+      const lim = Math.max(0, PORTAL_HALF - he - 1);
+      const corr = clamp(across, -lim, lim) - across;
+      if (Math.abs(corr) < 0.4) continue;
+      const step = clamp(corr, -7, 7);
+      b.position.x += p.ux * step;
+      b.position.y += p.uy * step;
+      return;
+    }
+  }
+  tryTeleport(o) {
+    const b = o.body; if (!b || !b.enable) return;
+    const cx = b.position.x + b.halfWidth, cy = b.position.y + b.halfHeight;
+    const px = b.prev.x + b.halfWidth, py = b.prev.y + b.halfHeight;
+    for (const p of this.portals) {
+      if (!p.link || p.t < 0.4) continue;
+      const d0 = (px - p.cx) * p.nx + (py - p.cy) * p.ny;
+      const d1 = (cx - p.cx) * p.nx + (cy - p.cy) * p.ny;
+      if (d0 < 0 || d1 >= 0) continue;
+      const across = (cx - p.cx) * p.ux + (cy - p.cy) * p.uy;
+      const he = Math.abs(p.ux) > 0.5 ? b.halfWidth : b.halfHeight;
+      if (Math.abs(across) > PORTAL_HALF - he + 4) continue;
+      const q = p.link;
+      /* keep the arrival inside the exit aperture, or the body lands half
+         buried in the wall around it and Arcade shoves it somewhere absurd */
+      const heOut = Math.abs(q.ux) > 0.5 ? b.halfWidth : b.halfHeight;
+      const lim = Math.max(0, PORTAL_HALF - heOut);
+      const off = clamp(-across, -lim, lim);
+      const nx = q.cx + q.nx * (-d1 + 2) + q.ux * off;
+      const ny = q.cy + q.ny * (-d1 + 2) + q.uy * off;
+      const vAl = b.velocity.x * p.nx + b.velocity.y * p.ny;
+      const vAc = b.velocity.x * p.ux + b.velocity.y * p.uy;
+      let vx = q.nx * (-vAl) + q.ux * (-vAc);
+      let vy = q.ny * (-vAl) + q.uy * (-vAc);
+      const sp = Math.hypot(vx, vy);
+      if (sp > VMAX) { vx = vx / sp * VMAX; vy = vy / sp * VMAX; }
+      b.reset(nx, ny);
+      b.setVelocity(vx, vy);
+      o.justPorted = 0.12;
+      if (o === this.player) { this.player.coyote = 0; SFX.tone(520, 0.16, { type: "sine", v: 0.07, to: 220 }); }
+      this.puff(nx, ny, q.color === "b" ? C.blue : q.color === "o" ? C.orange : 0x9fb2c4, 5);
+      return;
+    }
+  }
+
+  /* =======================================================================
+     TEST ELEMENTS
+     ======================================================================= */
+  buildObjects(L) {
+    this.btns = []; this.peds = []; this.doors = []; this.funnels = []; this.bridges = [];
+    this.lasers = []; this.catchers = []; this.fizzlers = []; this.droppers = [];
+    this.plates = []; this.turrets = []; this.disps = []; this.fx = [];
+    this.bridgePool = [];
+
+    for (const o of (L.obj || [])) {
+      switch (o.t) {
+        case "cube": this.spawnCube(o.x * T + T / 2, o.y * T + T / 2, o.kind || "std", null); break;
+        case "disp": this.disps.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, kind: o.kind || "std", cube: null, wait: 0.2 }); break;
+        case "btn": this.btns.push({ x: o.x * T, y: o.y * T, w: 2 * T, ch: o.ch, on: false, p: 0 }); break;
+        case "ped": this.peds.push({ x: o.x * T + T / 2, y: o.y * T, ch: o.ch, time: o.time, left: 0, glow: 0 }); break;
+        case "door": {
+          const d = { x: o.x * T, y: o.y * T, w: o.w * T, h: o.h * T, ch: o.ch, open: 0, wide: o.w > o.h };
+          d.zone = this.add.zone(0, 0, 8, 8); this.solidGroup.add(d.zone);
+          this.doors.push(d); break;
+        }
+        case "funnel": this.funnels.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, d: o.d, ch: o.ch || null, rev: o.rev || null, segs: [], on: true, pol: 1 }); break;
+        case "bridge": this.bridges.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, d: o.d, ch: o.ch || null, segs: [], on: true, sig: "" }); break;
+        case "laser": this.lasers.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, d: o.d, ch: o.ch || null, segs: [], on: true }); break;
+        case "catcher": this.catchers.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, d: o.d, ch: o.ch, latch: !!o.latch, lit: false, glow: 0 }); break;
+        case "fizz": this.fizzlers.push({ x: o.x * T, y: o.y * T, w: T, h: o.h * T, ph: 0 }); break;
+        case "drop": this.droppers.push({ x: o.x * T + T / 2, y: o.y * T + T / 2, gel: o.gel, ch: o.ch || null, t: 0 }); break;
+        case "plate": this.plates.push({ x: o.x * T, y: o.y * T, w: 2 * T, vx: o.vx, vy: o.vy, cool: 0, fire: 0 }); break;
+        case "turret": this.turrets.push({ x: o.x * T + T / 2, y: o.y * T, f: o.f, alive: true, tip: 0, charge: 0, cool: 0, seen: 0, sight: 0 }); break;
+      }
+    }
+    const [ex, ey] = L.exit;
+    this.exit = { x: ex * T, y: (ey - 2) * T, w: T, h: 2 * T, ch: L.exitCh || null, lit: 0 };
+  }
+
+  spawnCube(x, y, kind, src) {
+    const c = this.add.zone(x, y, CUBE, CUBE);
+    this.cubeGroup.add(c);
+    c.body.setSize(CUBE, CUBE);
+    c.body.setBounce(0.16);
+    c.body.setDragX(700);
+    c.body.setMaxVelocity(VMAX, VMAX);
+    c.body.setCollideWorldBounds(true);
+    c.body.pushable = false;      // a cube you can shove is a cube you lose
+    c.kind = kind; c.rot = 0; c.held = false; c.src = src || null;
+    c.wob = 0; c.justPorted = 0;
+    this.cubes.push(c);
+    if (src) src.cube = c;
+    return c;
+  }
+  killCube(c, silent) {
+    if (!silent) { SFX.fizz(); this.puff(c.x, c.y, 0xbfe8ff, 16); }
+    if (this.player.hold === c) this.player.hold = null;
+    if (c.src) { c.src.cube = null; c.src.wait = 0.9; }
+    const i = this.cubes.indexOf(c); if (i >= 0) this.cubes.splice(i, 1);
+    c.destroy();
+  }
+
+  computeSignals() {
+    this.sig.clear();
+    for (const ch of this.latched) this.sig.add(ch);
+    for (const b of this.btns) if (b.on) this.sig.add(b.ch);
+    for (const p of this.peds) if (p.left > 0) this.sig.add(p.ch);
+    for (const c of this.catchers) if (c.lit) this.sig.add(c.ch);
+  }
+  powered(ch) { return ch == null ? true : this.sig.has(ch); }
+
+  updateButtons(d) {
+    for (const b of this.btns) {
+      const top = b.y - 7;
+      let on = false;
+      const rest = (e) => {
+        const bb = e.body;
+        return bb.right > b.x + 4 && bb.x < b.x + b.w - 4 && bb.bottom > top - 3 && bb.bottom < b.y + 12;
+      };
+      if (rest(this.player)) on = true;
+      for (const c of this.cubes) if (!c.held && rest(c)) on = true;
+      if (on !== b.on) { b.on = on; SFX.click(!on); }
+      b.p = Phaser.Math.Linear(b.p, on ? 1 : 0, 0.35);
+    }
+    for (const p of this.peds) {
+      if (p.left > 0) { p.left -= d; if (p.left <= 0) { p.left = 0; SFX.click(true); } }
+      p.glow = p.left > 0 ? 1 : Math.max(0, p.glow - d * 3);
+    }
+  }
+  updateDoors(d) {
+    for (const dr of this.doors) {
+      const want = this.powered(dr.ch) ? 1 : 0;
+      if ((want === 1) !== (dr.open > 0.5)) SFX.door();
+      dr.open = Phaser.Math.Linear(dr.open, want, 0.12);
+      if (dr.open > 0.97) { dr.zone.body.enable = false; continue; }
+      let x, y, w, h;
+      if (dr.wide) { w = dr.w * (1 - dr.open); h = dr.h; x = dr.x + dr.w * dr.open + w / 2; y = dr.y + h / 2; }
+      else { h = dr.h * (1 - dr.open); w = dr.w; x = dr.x + w / 2; y = dr.y + dr.h * dr.open + h / 2; }
+      dr.zone.setPosition(x, y).setSize(Math.max(2, w), Math.max(2, h));
+      dr.zone.body.setSize(Math.max(2, w), Math.max(2, h));
+      dr.zone.body.updateFromGameObject();
+      dr.zone.body.enable = true;
+    }
+  }
+
+  /* ---------- the beam tracer ------------------------------------------
+     One routine walks every beam in the game — light bridges, excursion
+     funnels and discouragement beams. It hops portals (rotating direction
+     into the exit portal's frame) and can be redirected by a mirror cube. */
+  portalCross(x, y, ax, ay) {
+    for (const p of this.portals) {
+      if (!p.link || p.t < 0.9) continue;
+      const d0 = (x - p.cx) * p.nx + (y - p.cy) * p.ny;
+      const d1 = (ax - p.cx) * p.nx + (ay - p.cy) * p.ny;
+      /* epsilon on the far side: a sample landing exactly on the plane still
+         counts, otherwise the beam stops on the wall tile it was about to enter */
+      if (d0 < -0.001 || d1 > 0.001) continue;
+      const across = (ax - p.cx) * p.ux + (ay - p.cy) * p.uy;
+      if (Math.abs(across) > PORTAL_HALF) continue;
+      return { p, across };
+    }
+    return null;
+  }
+  traceBeam(ox, oy, dx, dy, hitTest) {
+    const segs = []; let x = ox, y = oy, hit = null;
+    for (let leg = 0; leg < 8; leg++) {
+      const sx = x, sy = y; let act = null;
+      for (let s = 0; s < 760; s++) {
+        const ax = x + dx * 4, ay = y + dy * 4;
+        if (ax < 1 || ay < 1 || ax >= WW - 1 || ay >= WH - 1) { x = ax; y = ay; break; }
+        const cross = this.portalCross(x, y, ax, ay);
+        if (cross) { x = ax; y = ay; act = { t: "hop", c: cross }; break; }
+        if (hitTest) { const h = hitTest(ax, ay, dx, dy); if (h) { x = ax; y = ay; act = { t: "hit", h }; break; } }
+        if (this.isSolidTile((ax / T) | 0, (ay / T) | 0)) { x = ax; y = ay; break; }
+        x = ax; y = ay;
+      }
+      segs.push({ x1: sx, y1: sy, x2: x, y2: y, dx, dy });
+      if (!act) break;
+      if (act.t === "hit") {
+        if (act.h.redirect) { dx = act.h.redirect[0]; dy = act.h.redirect[1]; x += dx * 14; y += dy * 14; continue; }
+        hit = act.h; break;
+      }
+      const p = act.c.p, q = p.link, across = act.c.across;
+      const al = dx * p.nx + dy * p.ny, ac = dx * p.ux + dy * p.uy;
+      const ndx = q.nx * (-al) + q.ux * (-ac);
+      const ndy = q.ny * (-al) + q.uy * (-ac);
+      x = q.cx + q.nx * 3 + q.ux * (-across);
+      y = q.cy + q.ny * 3 + q.uy * (-across);
+      dx = ndx; dy = ndy;
+    }
+    return { segs, hit };
+  }
+
+  updateBeams(d) {
+    /* --- hard light bridges: each segment becomes a real solid --- */
+    let need = 0;
+    for (const b of this.bridges) {
+      b.on = this.powered(b.ch);
+      const [dx, dy] = DIRV[b.d];
+      b.segs = b.on ? this.traceBeam(b.x + dx * (T / 2), b.y + dy * (T / 2), dx, dy, null).segs : [];
+      need += b.segs.length;
+    }
+    while (this.bridgePool.length < need) {
+      const z = this.add.zone(0, 0, 8, 8); this.solidGroup.add(z); this.bridgePool.push(z);
+    }
+    let bi = 0;
+    for (const b of this.bridges) for (const s of b.segs) {
+      const z = this.bridgePool[bi++];
+      const w = Math.abs(s.x2 - s.x1) + (s.dx ? 0 : 12), h = Math.abs(s.y2 - s.y1) + (s.dy ? 0 : 12);
+      z.setPosition((s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2).setSize(Math.max(4, w), Math.max(4, h));
+      z.body.setSize(Math.max(4, w), Math.max(4, h));
+      z.body.updateFromGameObject(); z.body.enable = true;
+    }
+    for (; bi < this.bridgePool.length; bi++) this.bridgePool[bi].body.enable = false;
+
+    /* --- excursion funnels --- */
+    for (const f of this.funnels) {
+      f.on = this.powered(f.ch);
+      if (f.rev) f.pol = this.sig.has(f.rev) ? -1 : 1;
+      const [dx, dy] = DIRV[f.d];
+      f.segs = f.on ? this.traceBeam(f.x + dx * (T / 2), f.y + dy * (T / 2), dx, dy, null).segs : [];
+    }
+
+    /* --- thermal discouragement beams --- */
+    let anyLaser = false;
+    for (const c of this.catchers) c.hitNow = false;
+    for (const l of this.lasers) {
+      l.on = this.powered(l.ch);
+      if (!l.on) { l.segs = []; continue; }
+      anyLaser = true;
+      const [dx, dy] = DIRV[l.d];
+      const r = this.traceBeam(l.x + dx * (T / 2), l.y + dy * (T / 2), dx, dy, (x, y, bx, by) => {
+        for (const cu of this.cubes) {
+          if (cu.kind !== "redirect") continue;
+          const b = cu.body;
+          if (x > b.x && x < b.right && y > b.y && y < b.bottom) {
+            /* the mirror is a 45 degree diagonal: rot 0 is "/", rot 1 is "\" */
+            const m = cu.rot === 0
+              ? { "1,0": [0, -1], "0,1": [-1, 0], "-1,0": [0, 1], "0,-1": [1, 0] }
+              : { "1,0": [0, 1], "0,-1": [-1, 0], "-1,0": [0, -1], "0,1": [1, 0] };
+            const k = `${Math.round(bx)},${Math.round(by)}`;
+            if (m[k]) return { redirect: m[k], cube: cu };
+            return { stop: true };
+          }
+        }
+        for (const ca of this.catchers) {
+          const [nx, ny] = DIRV[ca.d];
+          const w = nx ? 14 : 64, h = nx ? 64 : 14;
+          const cx = ca.x + nx * 8, cy = ca.y + ny * 8;
+          if (Math.abs(x - cx) < w / 2 && Math.abs(y - cy) < h / 2) { ca.hitNow = true; return { stop: true, catcher: ca }; }
+        }
+        return null;
+      });
+      l.segs = r.segs;
+    }
+    for (const c of this.catchers) {
+      const lit = c.hitNow || (c.latch && c.lit);
+      if (lit && !c.lit) { SFX.tone(660, 0.3, { type: "triangle", v: 0.11, to: 1320 }); if (c.latch) this.latched.add(c.ch); }
+      c.lit = lit;
+      c.glow = Phaser.Math.Linear(c.glow, lit ? 1 : 0, 0.2);
+    }
+    SFX.hum("laser", 70, "sawtooth").set(anyLaser ? 0.018 : 0);
+    SFX.hum("funnel", 110, "sine").set(this.funnels.some(f => f.on) ? 0.02 : 0);
+  }
+
+  /* an entity inside a funnel is carried along it and pulled to its axis */
+  funnelPush(e) {
+    if ((e.funnelOff || 0) > 0) return false;    // just jumped out of one
+    for (const f of this.funnels) {
+      if (!f.on) continue;
+      for (const s of f.segs) {
+        const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+        if (len < 2) continue;
+        const rx = e.x - s.x1, ry = e.y - s.y1;
+        const al = rx * s.dx + ry * s.dy;
+        if (al < -10 || al > len + 10) continue;
+        const pe = rx * -s.dy + ry * s.dx;
+        if (Math.abs(pe) > 30) continue;
+        const spd = 200 * f.pol;
+        const tvx = s.dx * spd + (-s.dy) * (-pe * 5);
+        const tvy = s.dy * spd + (s.dx) * (-pe * 5);
+        e.body.allowGravity = false;
+        e.body.velocity.x = Phaser.Math.Linear(e.body.velocity.x, tvx, 0.14);
+        e.body.velocity.y = Phaser.Math.Linear(e.body.velocity.y, tvy, 0.14);
+        return true;
+      }
+    }
+    return false;
+  }
+  laserHits(bx, by, bw, bh) {
+    for (const l of this.lasers) for (const s of l.segs) {
+      const x1 = Math.min(s.x1, s.x2) - 2, x2 = Math.max(s.x1, s.x2) + 2;
+      const y1 = Math.min(s.y1, s.y2) - 2, y2 = Math.max(s.y1, s.y2) + 2;
+      if (bx < x2 && bx + bw > x1 && by < y2 && by + bh > y1) return true;
+    }
+    return false;
+  }
+  fizzAt(x, y) {
+    for (const f of this.fizzlers) if (x > f.x && x < f.x + f.w && y > f.y && y < f.y + f.h) return f;
+    return null;
+  }
+
+  /* =======================================================================
+     THE TEST SUBJECT
+     ======================================================================= */
+  setupInput() {
+    const k = this.input.keyboard;
+    this.keys = k.addKeys({
+      left: "A", right: "D", al: "LEFT", ar: "RIGHT",
+      up: "W", au: "UP", jump: "SPACE", grab: "E", rot: "Q",
+      reset: "R", mute: "M", menu: "ESC", alt: "F",
+    });
+    this.input.mouse.disableContextMenu();
+    this.input.on("pointerdown", (pt) => {
+      if (this.dead || this.won) return;
+      if (pt.rightButtonDown()) this.shootPortal("o"); else this.shootPortal("b");
+    });
+    this.aimX = WW / 2; this.aimY = WH / 2;
+  }
+
+  gelUnder(e) {
+    const b = e.body, ty = Math.floor((b.bottom + 3) / T);
+    for (let tx = Math.floor((b.x + 2) / T); tx <= Math.floor((b.right - 2) / T); tx++)
+      if (this.isSolidTile(tx, ty) && this.gel[ty] && this.gel[ty][tx]) return this.gel[ty][tx];
+    return 0;
+  }
+  gelSide(e, dir) {
+    const b = e.body, tx = Math.floor((dir > 0 ? b.right + 3 : b.x - 3) / T);
+    for (let ty = Math.floor((b.y + 2) / T); ty <= Math.floor((b.bottom - 2) / T); ty++)
+      if (this.isSolidTile(tx, ty) && this.gel[ty] && this.gel[ty][tx]) return this.gel[ty][tx];
+    return 0;
+  }
+
+  updatePlayer(d) {
+    const p = this.player, b = p.body, K = this.keys;
+    const left = K.left.isDown || K.al.isDown;
+    const right = K.right.isDown || K.ar.isDown;
+    const jumpHeld = K.up.isDown || K.au.isDown || K.jump.isDown;
+    const ground = b.blocked.down || b.touching.down;
+    const gel = ground ? this.gelUnder(p) : 0;
+
+    p.funnelOff = Math.max(0, (p.funnelOff || 0) - d);
+    const inFunnel = this.funnelPush(p);
+    if (!inFunnel) b.allowGravity = true;
+
+    const vmaxWalk = gel === 2 ? 570 : 250;
+    const accel = ground ? (gel === 2 ? 2200 : 2600) : 1500;
+    const dir = (right ? 1 : 0) - (left ? 1 : 0);
+    if (dir !== 0) {
+      p.face = dir;
+      /* never fight momentum you already have — a fling must survive input */
+      if (Math.sign(b.velocity.x) !== dir || Math.abs(b.velocity.x) < vmaxWalk)
+        b.velocity.x = approach(b.velocity.x, dir * vmaxWalk, accel * d);
+    } else if (ground) {
+      b.velocity.x = approach(b.velocity.x, 0, (gel === 2 ? 240 : 2400) * d);
+    }
+    p.walk = ground && Math.abs(b.velocity.x) > 20 ? p.walk + d * Math.abs(b.velocity.x) * 0.035 : 0;
+
+    /* jump, with coyote time and an input buffer so it never feels stingy */
+    p.coyote = ground ? 0.1 : p.coyote - d;
+    p.buffer = (jumpHeld && !p.jumpWas) ? 0.12 : p.buffer - d;
+    p.jumpWas = jumpHeld;
+    /* jumping inside a funnel kicks you out of it — otherwise a funnel that
+       dead-ends against a wall is a trap with no exit but the restart key */
+    if (p.buffer > 0 && (p.coyote > 0 || inFunnel)) {
+      b.velocity.y = -720; p.buffer = 0; p.coyote = 0; p.jumping = true; SFX.jump();
+      if (inFunnel) { p.funnelOff = 0.55; b.allowGravity = true; }
+      this.puff(p.x, b.bottom, 0xd7dee4, 4);
+    }
+    /* variable jump height — but ONLY on a jump you started. Clamping every
+       upward velocity would quietly throttle every launch in the game. */
+    if (p.jumping) {
+      if (!jumpHeld) { if (b.velocity.y < -230) b.velocity.y = -230; p.jumping = false; }
+      else if (b.velocity.y >= 0) p.jumping = false;
+    }
+
+    /* repulsion gel: land on blue and you leave harder than you arrived */
+    if (ground && !p.wasDown) {
+      const imp = p.lastVY || 0;
+      if (gel === 1 && imp > 140) {
+        b.velocity.y = -clamp(imp * 0.96 + (jumpHeld ? 300 : 90), 660, VMAX);
+        SFX.bounce(); this.puff(p.x, b.bottom, C.gelBlue, 8);
+      } else if (imp > 300) SFX.land(imp / 9000);
+    }
+    if ((b.blocked.left && this.gelSide(p, -1) === 1) || (b.blocked.right && this.gelSide(p, 1) === 1)) {
+      b.velocity.x = -(p.lastVX || 0) * 0.92; SFX.bounce();
+    }
+    p.wasDown = ground;
+
+    /* pick up, put down, rotate */
+    if (Phaser.Input.Keyboard.JustDown(K.grab)) {
+      /* a pedestal within arm's reach wins over picking things up */
+      let ped = null, pd = 52 * 52;
+      for (const q of this.peds) {
+        const dd = (q.x - p.x) ** 2 + (q.y - 18 - p.y) ** 2;
+        if (dd < pd) { pd = dd; ped = q; }
+      }
+      if (ped) {
+        ped.left = ped.time; ped.glow = 1;
+        SFX.click(false); SFX.tone(880, 0.18, { type: "triangle", v: 0.09, to: 1200 });
+        this.puff(ped.x, ped.y - 36, 0x6fe0a8, 8);
+      } else if (p.hold) {
+        const c = p.hold; p.hold = null; c.held = false; c.body.allowGravity = true;
+        const a = Math.atan2(this.aimY - p.y, this.aimX - p.x);
+        c.body.setVelocity(b.velocity.x + Math.cos(a) * 330, b.velocity.y + Math.sin(a) * 330 - 60);
+        SFX.pick();
+      } else {
+        let best = null, bd = 74 * 74;
+        for (const c of this.cubes) {
+          const dd = (c.x - p.x) ** 2 + (c.y - p.y) ** 2;
+          if (dd < bd) { bd = dd; best = c; }
+        }
+        if (best) { p.hold = best; best.held = true; SFX.pick(); }
+      }
+    }
+    if (p.hold && Phaser.Input.Keyboard.JustDown(K.rot)) {
+      p.hold.rot ^= 1; SFX.tone(520, 0.08, { type: "square", v: 0.05 });
+    }
+    if (p.hold) {
+      const c = p.hold, a = Math.atan2(this.aimY - p.y, this.aimX - p.x);
+      const tx = p.x + Math.cos(a) * 36, ty = p.y + Math.sin(a) * 36 - 2;
+      c.body.allowGravity = false;
+      if (Math.hypot(tx - c.x, ty - c.y) > 130) c.body.reset(tx, ty);
+      c.body.velocity.x = clamp((tx - c.x) * 17, -950, 950);
+      c.body.velocity.y = clamp((ty - c.y) * 17, -950, 950);
+    }
+
+    p.lastVY = b.velocity.y; p.lastVX = b.velocity.x;
+    /* landing zeroes velocity instantly, so keep a short memory of the drop */
+    p.dropMem = b.velocity.y > 100 ? b.velocity.y : Math.max(0, (p.dropMem || 0) - 2200 * d);
+  }
+
+  updateCubes(d) {
+    for (const c of this.cubes.slice()) {
+      c.wob *= 0.9;
+      if (!c.held) c.body.allowGravity = !this.funnelPush(c);
+      if (this.gelUnder(c) === 1 && (c.body.blocked.down) && (c.lastVY || 0) > 220) {
+        c.body.velocity.y = -clamp((c.lastVY || 0) * 0.8, 300, 900); SFX.bounce();
+      }
+      c.lastVY = c.body.velocity.y;
+      c.dropMem = c.body.velocity.y > 90 ? c.body.velocity.y : Math.max(0, (c.dropMem || 0) - 2200 * d);
+      if (this.fizzAt(c.x, c.y)) { this.killCube(c); continue; }
+      for (let ty = Math.floor(c.body.y / T); ty <= Math.floor(c.body.bottom / T); ty++)
+        for (let tx = Math.floor(c.body.x / T); tx <= Math.floor(c.body.right / T); tx++)
+          if (this.isGoo(tx, ty)) { this.killCube(c); ty = 99; break; }
+    }
+    for (const s of this.disps) {
+      if (!s.cube) {
+        s.wait -= d;
+        if (s.wait <= 0) {
+          const c = this.spawnCube(s.x, s.y + T * 0.9, s.kind, s);
+          SFX.tone(420, 0.2, { type: "triangle", v: 0.07, to: 900 });
+          this.puff(s.x, s.y + T, 0xbfe8ff, 8);
+        }
+      }
+    }
+  }
+
+  /* ---------- gels ---------- */
+  updateGel(d) {
+    for (const dr of this.droppers) {
+      if (!this.powered(dr.ch)) continue;
+      dr.t -= d;
+      if (dr.t <= 0) {
+        dr.t = 0.26;
+        const z = this.add.zone(dr.x + (Math.random() - 0.5) * 12, dr.y + T * 0.6, 9, 9);
+        this.blobGroup.add(z);
+        z.body.setSize(9, 9); z.body.setMaxVelocity(VMAX, VMAX);
+        z.body.setVelocity((Math.random() - 0.5) * 30, 60);
+        z.gel = dr.gel === "blue" ? 1 : dr.gel === "orange" ? 2 : 3;
+        z.life = 7;
+        this.blobs.push(z);
+      }
+    }
+    for (const z of this.blobs.slice()) {
+      z.life -= d;
+      const b = z.body;
+      const hit = b.blocked.down || b.blocked.up || b.blocked.left || b.blocked.right;
+      if (this.fizzAt(z.x, z.y) || z.life <= 0) { this.dropBlob(z); continue; }
+      if (hit) { this.paintFrom(z); this.dropBlob(z); }
+    }
+  }
+  dropBlob(z) { const i = this.blobs.indexOf(z); if (i >= 0) this.blobs.splice(i, 1); z.destroy(); }
+  paintFrom(z) {
+    const b = z.body; let tx, ty, horiz;
+    if (b.blocked.down) { ty = Math.floor((b.bottom + 2) / T); tx = Math.floor(b.center.x / T); horiz = 1; }
+    else if (b.blocked.up) { ty = Math.floor((b.y - 2) / T); tx = Math.floor(b.center.x / T); horiz = 1; }
+    else if (b.blocked.left) { tx = Math.floor((b.x - 2) / T); ty = Math.floor(b.center.y / T); horiz = 0; }
+    else { tx = Math.floor((b.right + 2) / T); ty = Math.floor(b.center.y / T); horiz = 0; }
+    const spread = horiz ? [[-1, 0], [0, 0], [1, 0]] : [[0, -1], [0, 0], [0, 1]];
+    let did = false;
+    for (const [ox, oy] of spread) {
+      const x = tx + ox, y = ty + oy;
+      if (this.isSolidTile(x, y) && this.exposed(x, y) && this.gel[y][x] !== z.gel) { this.gel[y][x] = z.gel; did = true; }
+    }
+    if (did) { this.gelDirty = true; SFX.splat(); }
+    this.puff(z.x, z.y, z.gel === 1 ? C.gelBlue : z.gel === 2 ? C.gelOrange : C.gelWhite, 5);
+  }
+
+  /* ---------- turrets ---------- */
+  updateTurrets(d) {
+    for (const t of this.turrets) {
+      if (!t.alive) { t.tip = Math.min(1, t.tip + d * 3); continue; }
+      const eye = t.y - 24;
+      /* knocked over by anything that arrives with intent */
+      const box = { x: t.x - 14, y: t.y - 44, w: 28, h: 44 };
+      const bump = (e, hard) => {
+        const bb = e.body;
+        if (bb.right < box.x || bb.x > box.x + box.w || bb.bottom < box.y || bb.y > box.y + box.h) return false;
+        return hard;
+      };
+      /* read the speed from BEFORE the collision — by the time we look, Arcade
+         has already zeroed the velocity of anything that just landed on it */
+      const pdy = this.player.dropMem || 0, pvx = Math.abs(this.player.lastVX || 0);
+      if (bump(this.player, pdy > 150 || pvx > 380)) { this.tipTurret(t); continue; }
+      for (const c of this.cubes) {
+        if (bump(c, (c.dropMem || 0) > 110 || Math.abs(c.body.velocity.x) > 200)) { this.tipTurret(t); break; }
+      }
+      if (!t.alive) continue;
+
+      /* line of sight: blocked by walls and, usefully, by light bridges */
+      let range = 0, seen = false;
+      for (let r = 16; r < 460; r += 5) {
+        const x = t.x + t.f * r;
+        if (this.isSolidTile((x / T) | 0, (eye / T) | 0)) break;
+        if (this.solidBlocks(x, eye)) break;
+        range = r;
+        const pb = this.player.body;
+        if (x > pb.x && x < pb.right && eye > pb.y && eye < pb.bottom) { seen = true; break; }
+      }
+      t.sight = range;
+      t.seen = seen ? Math.min(1, t.seen + d * 3) : Math.max(0, t.seen - d * 1.6);
+      if (seen) {
+        t.charge += d;
+        if (t.charge > 0.38) {
+          t.cool -= d;
+          if (t.cool <= 0) {
+            t.cool = 0.11;
+            const z = this.add.zone(t.x + t.f * 18, eye, 6, 6);
+            this.bulletGroup.add(z);
+            z.body.setSize(6, 6); z.body.setAllowGravity(false);
+            z.body.setVelocity(t.f * 920, (Math.random() - 0.5) * 40);
+            z.life = 2; this.bullets.push(z);
+            SFX.shot();
+          }
+        }
+      } else t.charge = Math.max(0, t.charge - d * 2);
+    }
+    for (const z of this.bullets.slice()) {
+      z.life -= d;
+      const b = z.body;
+      if (z.life <= 0 || b.blocked.left || b.blocked.right || b.blocked.up || b.blocked.down) {
+        this.puff(z.x, z.y, 0xffd9a0, 3);
+        const i = this.bullets.indexOf(z); if (i >= 0) this.bullets.splice(i, 1); z.destroy(); continue;
+      }
+      const pb = this.player.body;
+      if (z.x > pb.x && z.x < pb.right && z.y > pb.y && z.y < pb.bottom) this.die();
+    }
+  }
+  tipTurret(t) {
+    t.alive = false; t.charge = 0;
+    SFX.tone(300, 0.5, { type: "sawtooth", v: 0.09, to: 60 });
+    SFX.noise(0.4, { freq: 700, to: 90, v: 0.08 });
+    this.puff(t.x, t.y - 20, 0xffb0b0, 10);
+  }
+  solidBlocks(x, y) {
+    for (const z of this.bridgePool) if (z.body.enable && Math.abs(x - z.x) < z.width / 2 && Math.abs(y - z.y) < z.height / 2) return true;
+    for (const dr of this.doors) if (dr.zone.body.enable && Math.abs(x - dr.zone.x) < dr.zone.width / 2 && Math.abs(y - dr.zone.y) < dr.zone.height / 2) return true;
+    return false;
+  }
+
+  /* ---------- everything that can end the test ---------- */
+  updateHazards(d) {
+    const p = this.player, b = p.body;
+    for (let ty = Math.floor(b.y / T); ty <= Math.floor(b.bottom / T); ty++)
+      for (let tx = Math.floor(b.x / T); tx <= Math.floor(b.right / T); tx++)
+        if (this.isGoo(tx, ty)) return this.die();
+    if (this.laserHits(b.x, b.y, b.width, b.height)) return this.die();
+
+    /* emancipation grill: portals fizzle, cubes do not survive the trip */
+    for (const f of this.fizzlers) {
+      f.ph += d;
+      if (b.right > f.x && b.x < f.x + f.w && b.bottom > f.y && b.y < f.y + f.h) {
+        if (!p.inFizz) {
+          p.inFizz = true;
+          if (p.hold) this.killCube(p.hold);
+          if (this.pB || this.pO) this.clearGunPortals();
+        }
+      } else if (p.inFizz && !this.fizzAt(p.x, p.y)) p.inFizz = false;
+    }
+
+    for (const pl of this.plates) {
+      pl.cool -= d; pl.fire = Math.max(0, pl.fire - d * 4);
+      const top = pl.y - 6;
+      const launch = (e) => {
+        const bb = e.body;
+        if (bb.right < pl.x + 3 || bb.x > pl.x + pl.w - 3) return false;
+        if (bb.bottom < top - 6 || bb.bottom > pl.y + 14) return false;
+        return bb.velocity.y >= -10;
+      };
+      if (pl.cool <= 0) {
+        if (launch(p)) { b.setVelocity(pl.vx, pl.vy); pl.cool = 0.4; pl.fire = 1; SFX.plate(); }
+        else for (const c of this.cubes) if (!c.held && launch(c)) { c.body.setVelocity(pl.vx, pl.vy); pl.cool = 0.4; pl.fire = 1; SFX.plate(); break; }
+      }
+    }
+
+    const ex = this.exit;
+    ex.lit = Phaser.Math.Linear(ex.lit, this.powered(ex.ch) ? 1 : 0, 0.15);
+    if (this.powered(ex.ch) && b.right > ex.x + 4 && b.x < ex.x + ex.w - 4 && b.bottom > ex.y + 8 && b.y < ex.y + ex.h) this.winChamber();
+  }
+
+  die() {
+    if (this.dead || this.won) return;
+    this.dead = true;
+    SFX.die();
+    this.registry.set("deaths", (this.registry.get("deaths") | 0) + 1);
+    this.cameras.main.shake(180, 0.012);
+    this.cameras.main.fade(400, 8, 4, 4);
+    this.time.delayedCall(540, () => this.scene.restart({ idx: this.idx }));
+  }
+  winChamber() {
+    if (this.won) return;
+    this.won = true;
+    SFX.win();
+    const b = SAVE.data.best[this.idx];
+    if (!b || this.chamberTime < b) SAVE.data.best[this.idx] = this.chamberTime;
+    SAVE.data.unlocked = Math.max(SAVE.data.unlocked, Math.min(LEVELS.length, this.idx + 2));
+    SAVE.save();
+    this.add.text(WW / 2, WH / 2 - 20, "TEST COMPLETE", {
+      fontFamily: "ui-monospace, Menlo, monospace", fontSize: "44px", color: "#eef4f8",
+    }).setOrigin(0.5).setDepth(40);
+    this.cameras.main.fade(900, 5, 8, 11);
+    this.time.delayedCall(1050, () => {
+      if (this.idx + 1 < LEVELS.length) this.scene.restart({ idx: this.idx + 1 });
+      else this.scene.start("Menu", { done: true });
+    });
+  }
+  puff(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 30 + Math.random() * 130;
+      this.fx.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 20, life: 0.35 + Math.random() * 0.35, t: 0, c: color, r: 1.5 + Math.random() * 2.5 });
+    }
+    if (this.fx.length > 400) this.fx.splice(0, this.fx.length - 400);
+  }
+
+  /* =======================================================================
+     UPDATE
+     ======================================================================= */
+  update(time, delta) {
+    const d = Math.min(delta, 40) / 1000;
+    const pt = this.input.activePointer;
+    this.aimX = pt.worldX; this.aimY = Math.min(pt.worldY, WH - 2);
+    const K = this.keys;
+    if (Phaser.Input.Keyboard.JustDown(K.reset)) { this.scene.restart({ idx: this.idx }); return; }
+    if (Phaser.Input.Keyboard.JustDown(K.menu)) { this.scene.start("Menu"); return; }
+    if (Phaser.Input.Keyboard.JustDown(K.mute)) SFX.on = !SFX.on;
+    if (Phaser.Input.Keyboard.JustDown(K.alt)) this.shootPortal("o");
+
+    if (!this.dead && !this.won) {
+      this.chamberTime += d;
+      this.computeSignals();
+      this.updateButtons(d);
+      this.updateDoors(d);
+      this.updateBeams(d);
+      this.updatePlayer(d);
+      this.updateCubes(d);
+      this.updateGel(d);
+      this.updateTurrets(d);
+      this.updateHazards(d);
+    }
+    for (const p of this.portals) p.t = Math.min(1, p.t + d * 6);
+    this.gunFlash = Math.max(0, (this.gunFlash || 0) - d * 5);
+    for (const f of this.fx.slice()) {
+      f.t += d;
+      if (f.t >= f.life) { this.fx.splice(this.fx.indexOf(f), 1); continue; }
+      f.x += f.vx * d; f.y += f.vy * d; f.vy += 380 * d; f.vx *= 0.96;
+    }
+    if (this.gelDirty) { this.drawGel(); this.gelDirty = false; }
+    this.draw(time / 1000);
+  }
+
+  /* =======================================================================
+     RENDER — all of it generated, none of it loaded
+     ======================================================================= */
+  paintBackground() {
+    const g = this.bg;
+    g.clear();
+    for (let i = 0; i < 24; i++) {
+      const t = i / 23;
+      g.fillStyle(Phaser.Display.Color.Interpolate.ColorWithColor(
+        Phaser.Display.Color.ValueToColor(C.bg1), Phaser.Display.Color.ValueToColor(C.bg0), 23, i).color, 1);
+      g.fillRect(0, (WH / 24) * i, WW, WH / 24 + 1);
+    }
+    g.lineStyle(1, 0x1b2731, 0.5);
+    for (let x = 0; x <= COLS; x += 2) { g.beginPath(); g.moveTo(x * T, 0); g.lineTo(x * T, WH); g.strokePath(); }
+    for (let y = 0; y <= ROWS; y += 2) { g.beginPath(); g.moveTo(0, y * T); g.lineTo(WW, y * T); g.strokePath(); }
+    /* a couple of distant structural girders so the void has depth */
+    g.fillStyle(0x27343f, 1);
+    for (let i = 0; i < 5; i++) g.fillRect(120 + i * 260, 0, 26, WH);
+    g.fillStyle(0x1d2833, 1);
+    for (let i = 0; i < 4; i++) g.fillRect(0, 90 + i * 190, WW, 18);
+    g.fillStyle(0x33424e, 0.5);
+    for (let i = 0; i < 5; i++) g.fillRect(120 + i * 260, 0, 4, WH);
+  }
+  paintLevel() {
+    this.rt.clear();
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const c = this.grid[y][x];
+      if (c === " ") continue;
+      const key = c === "W" ? "t_panel" : c === "#" ? "t_wall" : c === "G" ? "t_glass" : c === "=" ? "t_grate" : "t_goo";
+      this.rt.draw(key, x * T, y * T);
+    }
+    const g = this.make.graphics({ add: false });
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (!this.isSolidTile(x, y)) continue;
+      const px = x * T, py = y * T, w = this.ch(x, y) === "W";
+      const edge = (x1, y1, x2, y2) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.strokePath(); };
+      g.lineStyle(2, w ? 0xffffff : 0x5d6b78, w ? 0.5 : 0.55);
+      if (!this.isSolidTile(x, y - 1)) edge(px, py + 1, px + T, py + 1);
+      if (!this.isSolidTile(x - 1, y)) edge(px + 1, py, px + 1, py + T);
+      g.lineStyle(2, w ? 0x8d9ba7 : 0x0d1319, 0.6);
+      if (!this.isSolidTile(x, y + 1)) edge(px, py + T - 1, px + T, py + T - 1);
+      if (!this.isSolidTile(x + 1, y)) edge(px + T - 1, py, px + T - 1, py + T);
+    }
+    /* goo gets a bright meniscus wherever it meets air */
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      if (this.ch(x, y) !== "~" || this.ch(x, y - 1) === "~") continue;
+      g.fillStyle(C.goo, 0.85); g.fillRect(x * T, y * T, T, 4);
+      g.fillStyle(0xffffff, 0.18); g.fillRect(x * T, y * T, T, 2);
+    }
+    this.rt.draw(g); g.destroy();
+  }
+  drawGel() {
+    const g = this.gfxGel; g.clear();
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const k = this.gel[y][x]; if (!k) continue;
+      const col = k === 1 ? C.gelBlue : k === 2 ? C.gelOrange : C.gelWhite;
+      const px = x * T, py = y * T;
+      g.fillStyle(col, 0.92);
+      if (!this.isSolidTile(x, y - 1)) { g.fillRect(px, py, T, 7); g.fillStyle(col, 0.5); g.fillRect(px + 6, py + 7, 6, 5); g.fillRect(px + 21, py + 7, 5, 4); g.fillStyle(col, 0.92); }
+      if (!this.isSolidTile(x, y + 1)) g.fillRect(px, py + T - 6, T, 6);
+      if (!this.isSolidTile(x - 1, y)) g.fillRect(px, py, 6, T);
+      if (!this.isSolidTile(x + 1, y)) g.fillRect(px + T - 6, py, 6, T);
+      g.fillStyle(0xffffff, 0.22);
+      if (!this.isSolidTile(x, y - 1)) g.fillRect(px + 3, py + 1, T - 6, 2);
+    }
+  }
+
+  draw(now) {
+    const gb = this.gfxBeam, go = this.gfxObj, ga = this.gfxActor, gp = this.gfxPortal;
+    gb.clear(); go.clear(); ga.clear(); gp.clear();
+
+    /* ---- excursion funnels ---- */
+    for (const f of this.funnels) {
+      const [dx, dy] = DIRV[f.d];
+      this.emitterBox(go, f.x, f.y, dx, dy, f.on ? C.funnel : 0x44515c, "funnel");
+      if (!f.on) continue;
+      for (const s of f.segs) {
+        const ang = Math.atan2(s.dy, s.dx), len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+        gb.save(); gb.translateCanvas(s.x1, s.y1); gb.rotateCanvas(ang);
+        gb.fillStyle(C.funnel, 0.10); gb.fillRect(0, -30, len, 60);
+        gb.fillStyle(C.funnel, 0.14); gb.fillRect(0, -20, len, 40);
+        gb.lineStyle(2, C.funnel, 0.5);
+        gb.beginPath(); gb.moveTo(0, -28); gb.lineTo(len, -28); gb.moveTo(0, 28); gb.lineTo(len, 28); gb.strokePath();
+        gb.fillStyle(0xffffff, 0.30);
+        const flow = ((now * 150 * f.pol) % 46 + 46) % 46;
+        for (let o = -46; o < len + 46; o += 46) {
+          const px = o + flow;
+          if (px < 0 || px > len) continue;
+          gb.fillTriangle(px, -13, px, 13, px + 13 * f.pol, 0);
+        }
+        gb.restore();
+      }
+    }
+    /* ---- hard light bridges ---- */
+    for (const b of this.bridges) {
+      const [dx, dy] = DIRV[b.d];
+      this.emitterBox(go, b.x, b.y, dx, dy, b.on ? C.bridge : 0x44515c, "bridge");
+      for (const s of b.segs) {
+        const ang = Math.atan2(s.dy, s.dx), len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+        gb.save(); gb.translateCanvas(s.x1, s.y1); gb.rotateCanvas(ang);
+        gb.fillStyle(C.bridge, 0.16); gb.fillRect(0, -12, len, 24);
+        gb.fillStyle(C.bridge, 0.45); gb.fillRect(0, -6, len, 12);
+        gb.fillStyle(0xffffff, 0.85); gb.fillRect(0, -6, len, 2);
+        gb.fillStyle(0xffffff, 0.35); gb.fillRect(0, 4, len, 2);
+        for (let o = 0; o < len; o += 16) { gb.fillStyle(0xffffff, 0.14); gb.fillRect(o, -5, 2, 10); }
+        gb.restore();
+      }
+    }
+    /* ---- discouragement beams ---- */
+    for (const l of this.lasers) {
+      const [dx, dy] = DIRV[l.d];
+      this.emitterBox(go, l.x, l.y, dx, dy, l.on ? C.laser : 0x44515c, "laser");
+      const jit = 0.85 + Math.sin(now * 40) * 0.15;
+      for (const s of l.segs) {
+        gb.lineStyle(11, C.laser, 0.12 * jit); gb.lineBetween(s.x1, s.y1, s.x2, s.y2);
+        gb.lineStyle(5, C.laser, 0.45 * jit); gb.lineBetween(s.x1, s.y1, s.x2, s.y2);
+        gb.lineStyle(2, 0xffe8e8, 0.95); gb.lineBetween(s.x1, s.y1, s.x2, s.y2);
+      }
+      const last = l.segs[l.segs.length - 1];
+      if (last) { gb.fillStyle(0xffdede, 0.5); gb.fillCircle(last.x2, last.y2, 5 + Math.sin(now * 20) * 1.5); }
+    }
+
+    /* ---- fixed furniture ---- */
+    for (const f of this.fizzlers) {
+      go.fillStyle(0x1b2630, 1); go.fillRect(f.x + 2, f.y - 8, T - 4, 10); go.fillRect(f.x + 2, f.y + f.h - 2, T - 4, 10);
+      go.fillStyle(0xbfe8ff, 0.10); go.fillRect(f.x + 4, f.y, T - 8, f.h);
+      for (let i = 0; i < 4; i++) {
+        const o = ((now * 60 + i * 26) % (T - 12)) + 6;
+        go.fillStyle(0xdff3ff, 0.30); go.fillRect(f.x + o, f.y, 2, f.h);
+      }
+      go.lineStyle(2, 0xbfe8ff, 0.55); go.strokeRect(f.x + 4, f.y, T - 8, f.h);
+    }
+    for (const b of this.btns) {
+      const dy = b.p * 5;
+      go.fillStyle(0x1d2831, 1); go.fillRoundedRect(b.x - 3, b.y - 10, b.w + 6, 18, 4);
+      go.fillStyle(b.on ? 0x2b3d49 : 0x33414c, 1); go.fillRoundedRect(b.x + 2, b.y - 14 + dy, b.w - 4, 12, 4);
+      go.fillStyle(b.on ? 0x6fe0a8 : 0x8d9ba7, b.on ? 0.95 : 0.5);
+      go.fillRoundedRect(b.x + 8, b.y - 12 + dy, b.w - 16, 4, 2);
+    }
+    for (const p of this.peds) {
+      go.fillStyle(0x232f39, 1); go.fillRect(p.x - 7, p.y - 30, 14, 30);
+      go.fillStyle(0x2f3d48, 1); go.fillRoundedRect(p.x - 15, p.y - 40, 30, 14, 5);
+      const lit = p.left > 0;
+      go.fillStyle(lit ? 0x6fe0a8 : 0xd8534f, lit ? 1 : 0.75);
+      go.fillCircle(p.x, p.y - 36, 7);
+      go.fillStyle(0xffffff, 0.5); go.fillCircle(p.x - 2, p.y - 38, 2);
+      if (lit) {
+        go.lineStyle(3, 0x6fe0a8, 0.9);
+        go.beginPath(); go.arc(p.x, p.y - 36, 12, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (p.left / p.time)); go.strokePath();
+      }
+    }
+    for (const dr of this.doors) {
+      const o = dr.open;
+      if (dr.wide) {
+        const w = dr.w * (1 - o); if (w < 2) continue;
+        go.fillStyle(0x39444e, 1); go.fillRect(dr.x + dr.w * o, dr.y, w, dr.h);
+        go.fillStyle(0x1b2129, 1); go.fillRect(dr.x + dr.w * o, dr.y + dr.h / 2 - 2, w, 4);
+        go.fillStyle(0x6fe0a8, 0.6); go.fillRect(dr.x + dr.w * o, dr.y, 3, dr.h);
+      } else {
+        const h = dr.h * (1 - o); if (h < 2) continue;
+        go.fillStyle(0x39444e, 1); go.fillRect(dr.x, dr.y + dr.h * o, dr.w, h);
+        go.fillStyle(0x1b2129, 1); go.fillRect(dr.x + dr.w / 2 - 2, dr.y + dr.h * o, 4, h);
+        go.fillStyle(0x6fe0a8, 0.6); go.fillRect(dr.x, dr.y + dr.h * o, dr.w, 3);
+      }
+      go.lineStyle(2, 0x151b21, 1); go.strokeRect(dr.x, dr.y, dr.w, dr.h);
+    }
+    for (const c of this.catchers) {
+      const [nx, ny] = DIRV[c.d];
+      go.fillStyle(0x2b3540, 1);
+      go.fillRoundedRect(c.x - 12 - nx * 4, c.y - 12 - ny * 4, 24, 24, 5);
+      go.fillStyle(c.lit ? 0xffd97a : 0x4a5966, 1);
+      go.fillCircle(c.x + nx * 7, c.y + ny * 7, 7);
+      if (c.glow > 0.02) {
+        go.fillStyle(0xffd97a, 0.25 * c.glow); go.fillCircle(c.x + nx * 7, c.y + ny * 7, 17);
+        go.lineStyle(2, 0xffd97a, 0.7 * c.glow); go.strokeCircle(c.x + nx * 7, c.y + ny * 7, 12);
+      }
+    }
+    for (const s of this.disps) {
+      go.fillStyle(0x2b3540, 1); go.fillRoundedRect(s.x - 20, s.y - 16, 40, 30, 6);
+      go.fillStyle(0x18202a, 1); go.fillRect(s.x - 13, s.y + 10, 26, 8);
+      go.fillStyle(0x6fd0ff, 0.6); go.fillRect(s.x - 11, s.y + 11, 22, 3);
+    }
+    for (const dp of this.droppers) {
+      const col = dp.gel === "blue" ? C.gelBlue : dp.gel === "orange" ? C.gelOrange : C.gelWhite;
+      go.fillStyle(0x2b3540, 1); go.fillRoundedRect(dp.x - 15, dp.y - 18, 30, 26, 5);
+      go.fillStyle(col, 0.9); go.fillCircle(dp.x, dp.y + 2, 8);
+      go.fillStyle(col, 0.35); go.fillCircle(dp.x, dp.y + 12, 5);
+      go.fillStyle(0xffffff, 0.35); go.fillCircle(dp.x - 3, dp.y - 1, 2.5);
+    }
+    for (const pl of this.plates) {
+      go.fillStyle(0x2b3540, 1); go.fillRoundedRect(pl.x, pl.y - 12, pl.w, 14, 4);
+      go.fillStyle(pl.fire > 0.1 ? 0xffe08a : 0x51636f, 1);
+      go.fillRoundedRect(pl.x + 4, pl.y - 16 - pl.fire * 6, pl.w - 8, 8, 3);
+      go.lineStyle(2, 0xffe08a, 0.5 + pl.fire * 0.5);
+      for (let i = 0; i < 3; i++) go.strokeRect(pl.x + 8 + i * 14, pl.y - 8, 8, 5);
+    }
+    for (const t of this.turrets) this.drawTurret(go, t, now);
+    this.drawExit(go, now);
+
+    /* ---- cubes, player, particles ---- */
+    for (const c of this.cubes) this.drawCube(ga, c, now);
+    for (const z of this.blobs) {
+      const col = z.gel === 1 ? C.gelBlue : z.gel === 2 ? C.gelOrange : C.gelWhite;
+      ga.fillStyle(col, 0.95); ga.fillCircle(z.x, z.y, 5.5);
+      ga.fillStyle(0xffffff, 0.35); ga.fillCircle(z.x - 1.5, z.y - 1.5, 2);
+    }
+    for (const z of this.bullets) {
+      ga.fillStyle(0xffdca8, 0.9); ga.fillCircle(z.x, z.y, 3);
+      ga.fillStyle(0xffdca8, 0.25); ga.fillCircle(z.x, z.y, 7);
+    }
+    if (!this.dead) this.drawPlayer(ga, now);
+    for (const f of this.fx) {
+      const a = 1 - f.t / f.life;
+      ga.fillStyle(f.c, a * 0.9); ga.fillCircle(f.x, f.y, f.r * a + 0.5);
+    }
+
+    for (const p of this.portals) this.drawPortal(gp, p, now);
+    this.drawHud(now);
+  }
+
+  emitterBox(g, x, y, dx, dy, col, kind) {
+    g.save(); g.translateCanvas(x, y); g.rotateCanvas(Math.atan2(dy, dx));
+    g.fillStyle(0x232f39, 1); g.fillRoundedRect(-16, -15, 30, 30, 6);
+    g.fillStyle(0x141c24, 1); g.fillRect(-16, -11, 8, 22);
+    g.fillStyle(col, 0.95);
+    if (kind === "laser") { g.fillCircle(11, 0, 5); }
+    else if (kind === "bridge") { g.fillRect(8, -9, 6, 18); }
+    else { g.fillTriangle(6, -10, 6, 10, 16, 0); }
+    g.fillStyle(col, 0.22); g.fillCircle(12, 0, 13);
+    g.restore();
+  }
+  drawTurret(g, t, now) {
+    g.save(); g.translateCanvas(t.x, t.y);
+    if (!t.alive) g.rotateCanvas(t.tip * 1.45 * -t.f);
+    g.lineStyle(3, 0xc8d2da, 1);
+    g.lineBetween(0, -6, -9, 0); g.lineBetween(0, -6, 9, 0); g.lineBetween(0, -8, 0, 0);
+    g.fillStyle(0xeef3f7, 1); g.fillRoundedRect(-11, -34, 22, 29, 9);
+    g.fillStyle(0xc3ced7, 1); g.fillRoundedRect(-11, -18, 22, 6, 2);
+    const on = t.alive;
+    const eye = !on ? 0x59636c : (t.seen > 0.45 ? 0xff3b3b : 0xff9a5c);
+    g.fillStyle(eye, 1); g.fillCircle(t.f * 5, -24, 4.5);
+    g.fillStyle(eye, 0.3); g.fillCircle(t.f * 5, -24, 9);
+    g.restore();
+    if (t.alive && t.sight > 8) {
+      g.lineStyle(1, 0xff3b3b, 0.22 + t.seen * 0.55);
+      g.lineBetween(t.x + t.f * 14, t.y - 24, t.x + t.f * t.sight, t.y - 24);
+    }
+  }
+  drawExit(g, now) {
+    const e = this.exit, open = e.lit;
+    g.fillStyle(0x0a1016, 1); g.fillRect(e.x - 4, e.y - 6, e.w + 8, e.h + 6);
+    g.lineStyle(3, open > 0.5 ? 0x6fe0a8 : 0x44515c, 0.9);
+    g.strokeRect(e.x - 4, e.y - 6, e.w + 8, e.h + 6);
+    g.fillStyle(0x6fe0a8, 0.10 + open * 0.20); g.fillRect(e.x, e.y, e.w, e.h);
+    for (let i = 0; i < 4; i++) {
+      const yy = e.y + e.h - ((now * 40 + i * 18) % (e.h + 8));
+      g.fillStyle(0x6fe0a8, 0.35 * open); g.fillRect(e.x + 3, yy, e.w - 6, 3);
+    }
+    g.fillStyle(open > 0.5 ? 0x6fe0a8 : 0xd8534f, 0.95);
+    g.fillCircle(e.x + e.w / 2, e.y - 12, 4);
+  }
+  drawCube(g, c, now) {
+    const s = CUBE;
+    g.save(); g.translateCanvas(c.x, c.y);
+    if (c.held) g.rotateCanvas(Math.sin(now * 6) * 0.05);
+    g.fillStyle(0x6f7d89, 1); g.fillRoundedRect(-s / 2, -s / 2, s, s, 5);
+    g.fillStyle(0xc6d0d8, 1); g.fillRoundedRect(-s / 2 + 2, -s / 2 + 2, s - 4, s - 4, 4);
+    g.fillStyle(0x93a1ad, 1);
+    for (const [ox, oy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) g.fillCircle(ox * (s / 2 - 4), oy * (s / 2 - 4), 2.6);
+    if (c.kind === "redirect") {
+      const a = c.rot ? 1 : -1;
+      g.lineStyle(4, 0xff6b6b, 0.95);
+      g.lineBetween(-7, 7 * a, 7, -7 * a);
+      g.lineStyle(2, 0xffffff, 0.7);
+      g.lineBetween(-7, 7 * a - 2, 7, -7 * a - 2);
+      g.fillStyle(0xff6b6b, 0.25); g.fillCircle(0, 0, 9);
+    } else {
+      g.lineStyle(2.5, 0x4bb4ff, 0.95); g.strokeCircle(0, 0, 6.5);
+      g.fillStyle(0x4bb4ff, 0.9); g.fillCircle(0, 0, 2.4);
+      g.lineStyle(1.5, 0x4bb4ff, 0.5); g.strokeCircle(0, 0, 9.5);
+    }
+    g.restore();
+    if (c.held) { g.lineStyle(1, 0x9fd6ff, 0.5); g.strokeRect(c.x - s / 2 - 3, c.y - s / 2 - 3, s + 6, s + 6); }
+  }
+  drawPlayer(g, now) {
+    const p = this.player, b = p.body;
+    const x = p.x, y = p.y;
+    const ang = Math.atan2(this.aimY - y, this.aimX - x);
+    const face = Math.cos(ang) >= 0 ? 1 : -1;
+    const ground = b.blocked.down;
+    const sw = ground ? Math.sin(p.walk) * 8 : clamp(b.velocity.y / 90, -6, 6);
+
+    g.lineStyle(5, 0x39454f, 1);                             // legs
+    g.lineBetween(x, y + 3, x - sw * 0.7, y + 16);
+    g.lineBetween(x, y + 3, x + sw * 0.7, y + 16);
+    g.fillStyle(0x1f2830, 1);
+    g.fillRoundedRect(x - sw * 0.7 - 4, y + 14, 8, 4, 2);
+    g.fillRoundedRect(x + sw * 0.7 - 4, y + 14, 8, 4, 2);
+
+    g.fillStyle(0xe9eef2, 1); g.fillRoundedRect(x - 8, y - 12, 16, 19, 6);   // torso
+    g.fillStyle(0xff9b28, 1); g.fillRect(x - 8, y - 4, 16, 3);               // jumpsuit stripe
+    g.fillStyle(0x4bb4ff, 1); g.fillRect(x - 8, y + 1, 16, 2);
+
+    g.fillStyle(0xf4f8fa, 1); g.fillCircle(x, y - 18, 7.5);                  // head
+    g.fillStyle(0x1b2129, 1);
+    g.fillRoundedRect(x - 5 + face * 3, y - 21, 8, 6, 3);                    // visor
+    g.fillStyle(0x6fd0ff, 0.8); g.fillRect(x - 4 + face * 3, y - 20, 3, 2);
+
+    if (this.L.gun) {                                                        // the device
+      g.save(); g.translateCanvas(x, y - 6); g.rotateCanvas(ang);
+      g.fillStyle(0x2b3540, 1); g.fillRoundedRect(-4, -5, 26, 10, 3);
+      g.fillStyle(0x51636f, 1); g.fillRoundedRect(14, -7, 10, 14, 3);
+      const lc = this.lastShot === "o" ? C.orange : C.blue;
+      g.fillStyle(lc, 0.9 + (this.gunFlash || 0) * 0.1);
+      g.fillCircle(22, 0, 3.5 + (this.gunFlash || 0) * 4);
+      g.fillStyle(lc, 0.25 + (this.gunFlash || 0) * 0.5); g.fillCircle(22, 0, 9);
+      g.restore();
+    }
+  }
+  drawPortal(g, p, now) {
+    const col = p.color === "b" ? C.blue : p.color === "o" ? C.orange : 0x9d7bff;
+    const t = Phaser.Math.Easing.Back.Out(clamp(p.t, 0, 1));
+    const w = PORTAL_SPAN * t, h = 17 * clamp(p.t * 1.4, 0, 1);
+    const cx = p.cx + p.nx * 3, cy = p.cy + p.ny * 3;
+    g.save(); g.translateCanvas(cx, cy); g.rotateCanvas(Math.atan2(p.uy, p.ux));
+    g.fillStyle(col, 0.16); g.fillEllipse(0, 0, w + 30, h + 30);
+    g.fillStyle(col, 0.22); g.fillEllipse(0, 0, w + 12, h + 12);
+    g.fillStyle(0x04070a, 0.92); g.fillEllipse(0, 0, Math.max(0, w - 8), Math.max(0, h - 8));
+    g.lineStyle(4, col, 0.95); g.strokeEllipse(0, 0, w, h);
+    g.lineStyle(1.5, 0xffffff, 0.55); g.strokeEllipse(0, 0, Math.max(0, w - 9), Math.max(0, h - 9));
+    for (let i = 0; i < 5; i++) {                       // particles orbiting the rim
+      const a = now * 1.6 + i * 1.257;
+      g.fillStyle(0xffffff, 0.55);
+      g.fillCircle(Math.cos(a) * (w / 2 - 4), Math.sin(a) * (h / 2 - 3), 1.6);
+    }
+    g.restore();
+  }
+
+  drawHud(now) {
+    const g = this.gfxHud; g.clear();
+    g.fillStyle(0x080d12, 1); g.fillRect(0, WH, WW, HUDH);
+    g.lineStyle(2, 0x1c2733, 1); g.lineBetween(0, WH + 1, WW, WH + 1);
+    if (!this.hudA) {
+      const fs = { fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: "15px", color: "#dfe6ec" };
+      this.hudA = this.add.text(18, WH + 14, "", fs).setDepth(21);
+      this.hudB = this.add.text(18, WH + 36, "", { ...fs, fontSize: "12px", color: "#6d7c8a" }).setDepth(21);
+      this.hudC = this.add.text(WW - 18, WH + 14, "", { ...fs, align: "right" }).setDepth(21).setOrigin(1, 0);
+      this.hudD = this.add.text(WW - 18, WH + 36, "", { ...fs, fontSize: "12px", color: "#6d7c8a", align: "right" }).setDepth(21).setOrigin(1, 0);
+    }
+    this.hudA.setText(`CHAMBER ${String(this.idx + 1).padStart(2, "0")}  ${this.L.name}`);
+    const gunTxt = this.L.gun === 0 ? "no device" : this.L.gun === 1 ? "single aperture" : "dual aperture";
+    this.hudB.setText(`${gunTxt}   ·   A/D move   SPACE jump   E grab   Q rotate   R restart   ESC menu${SFX.on ? "" : "   ·   MUTED"}`);
+    const t = this.chamberTime;
+    this.hudC.setText(`${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}.${String(Math.floor(t * 100) % 100).padStart(2, "0")}`);
+    this.hudD.setText(`deaths ${this.registry.get("deaths") | 0}`);
+    /* aperture status lamps */
+    const lamp = (x, on, col) => {
+      g.fillStyle(col, on ? 0.95 : 0.18); g.fillCircle(x, WH + 32, 8);
+      g.lineStyle(2, col, on ? 0.9 : 0.3); g.strokeCircle(x, WH + 32, 12);
+    };
+    if (this.L.gun) { lamp(WW / 2 - 22, !!this.pB, C.blue); lamp(WW / 2 + 22, !!this.pO, C.orange); }
+
+    /* crosshair */
+    if (this.L.gun && !this.dead) {
+      g.lineStyle(2, 0xffffff, 0.75);
+      g.beginPath();
+      g.moveTo(this.aimX - 9, this.aimY); g.lineTo(this.aimX - 3, this.aimY);
+      g.moveTo(this.aimX + 3, this.aimY); g.lineTo(this.aimX + 9, this.aimY);
+      g.moveTo(this.aimX, this.aimY - 9); g.lineTo(this.aimX, this.aimY - 3);
+      g.moveTo(this.aimX, this.aimY + 3); g.lineTo(this.aimX, this.aimY + 9);
+      g.strokePath();
+      g.lineStyle(1, C.blue, 0.6); g.strokeCircle(this.aimX, this.aimY, 13);
+    }
+  }
+}
+
+/* =========================================================================
+   MENU
+   ========================================================================= */
+class Menu extends Phaser.Scene {
+  constructor() { super("Menu"); }
+  init(d) { this.done = d && d.done; }
+  create() {
+    document.getElementById("boot").classList.add("gone");
+    const mono = "ui-monospace, Menlo, Consolas, monospace";
+    const g = this.add.graphics();
+    for (let i = 0; i < 26; i++) {
+      g.fillStyle(Phaser.Display.Color.Interpolate.ColorWithColor(
+        Phaser.Display.Color.ValueToColor(0x101b25), Phaser.Display.Color.ValueToColor(0x05080b), 25, i).color, 1);
+      g.fillRect(0, (GH / 26) * i, WW, GH / 26 + 1);
+    }
+    g.fillStyle(C.blue, 0.05); g.fillCircle(210, 250, 260);
+    g.fillStyle(C.orange, 0.04); g.fillCircle(1080, 560, 240);
+
+    this.add.text(WW / 2, 96, "CROSS SECTION", { fontFamily: mono, fontSize: "62px", color: "#eef4f8" }).setOrigin(0.5);
+    this.add.text(WW / 2, 146, "a side-view Aperture testing initiative", { fontFamily: mono, fontSize: "16px", color: "#4bb4ff" }).setOrigin(0.5);
+    this.add.text(WW / 2, 168, "by Micah", { fontFamily: mono, fontSize: "13px", color: "#7d8b98" }).setOrigin(0.5);
+    this.add.text(WW / 2, 200,
+      "Fourteen chambers. Gels, funnels, light bridges and beams. The whole chamber fits on one screen —\nnothing is hidden off the edge, so every solution is one you can see from where you are standing.",
+      { fontFamily: mono, fontSize: "13px", color: "#7d8b98", align: "center", lineSpacing: 6 }).setOrigin(0.5);
+
+    if (this.done) this.add.text(WW / 2, 232, "ALL CHAMBERS COMPLETE — the cake situation remains unresolved",
+      { fontFamily: mono, fontSize: "14px", color: "#6fe0a8" }).setOrigin(0.5);
+
+    /* chamber grid */
+    const cols = 7, cw = 152, chh = 84, x0 = WW / 2 - (cols * cw) / 2 + cw / 2, y0 = 300;
+    for (let i = 0; i < LEVELS.length; i++) {
+      const cx = x0 + (i % cols) * cw, cy = y0 + Math.floor(i / cols) * (chh + 14);
+      const open = i < SAVE.data.unlocked;
+      const gg = this.add.graphics();
+      const paint = (hi) => {
+        gg.clear();
+        gg.fillStyle(open ? (hi ? 0x18242e : 0x0e161d) : 0x0a0f14, 1);
+        gg.fillRoundedRect(cx - cw / 2 + 6, cy - chh / 2, cw - 12, chh, 8);
+        gg.lineStyle(2, open ? (hi ? C.blue : 0x27333e) : 0x161d24, 1);
+        gg.strokeRoundedRect(cx - cw / 2 + 6, cy - chh / 2, cw - 12, chh, 8);
+      };
+      paint(false);
+      this.add.text(cx, cy - 22, open ? String(i + 1).padStart(2, "0") : "—",
+        { fontFamily: mono, fontSize: "20px", color: open ? "#eef4f8" : "#2c3841" }).setOrigin(0.5);
+      this.add.text(cx, cy + 6, open ? LEVELS[i].name : "LOCKED",
+        { fontFamily: mono, fontSize: "10px", color: open ? "#7d8b98" : "#2c3841", align: "center", wordWrap: { width: cw - 26 } }).setOrigin(0.5);
+      const bt = SAVE.data.best[i];
+      if (bt) this.add.text(cx, cy + 30, `${bt.toFixed(1)}s`, { fontFamily: mono, fontSize: "10px", color: "#4bb4ff" }).setOrigin(0.5);
+      if (!open) continue;
+      const z = this.add.zone(cx, cy, cw - 12, chh).setInteractive({ useHandCursor: true });
+      z.on("pointerover", () => paint(true));
+      z.on("pointerout", () => paint(false));
+      z.on("pointerdown", () => { SFX.click(false); this.scene.start("Game", { idx: i }); });
+    }
+
+    const next = Math.min(SAVE.data.unlocked - 1, LEVELS.length - 1);
+    this.add.text(WW / 2, GH - 74, `ENTER — ${SAVE.data.unlocked > 1 ? "resume at chamber " + String(next + 1).padStart(2, "0") : "begin testing"}`,
+      { fontFamily: mono, fontSize: "16px", color: "#eef4f8" }).setOrigin(0.5);
+    this.add.text(WW / 2, GH - 44,
+      "MOVE  A/D or arrows      JUMP  space/W      BLUE PORTAL  left click      ORANGE PORTAL  right click or F      GRAB  E      ROTATE MIRROR  Q      RESTART  R      MUTE  M",
+      { fontFamily: mono, fontSize: "11px", color: "#5d6b78" }).setOrigin(0.5);
+    this.add.text(WW / 2, GH - 20, "Keyboard and mouse required. Progress is saved in this browser.",
+      { fontFamily: mono, fontSize: "11px", color: "#3f4b56" }).setOrigin(0.5);
+
+    this.input.keyboard.on("keydown-ENTER", () => this.scene.start("Game", { idx: next }));
+    this.input.keyboard.on("keydown-M", () => { SFX.on = !SFX.on; });
+    this.input.once("pointerdown", () => SFX.ctx());
+  }
+}
+
+class Boot extends Phaser.Scene {
+  constructor() { super("Boot"); }
+  create() { buildTextures(this); this.scene.start("Menu"); }
+}
+
+/* ---------- go --------------------------------------------------------- */
+if (!window.Phaser) {
+  document.getElementById("boot").textContent = "Could not load the game engine — check your connection and reload.";
+} else {
+  window.GAME = new Phaser.Game({
+    type: Phaser.AUTO,
+    width: WW, height: GH,
+    backgroundColor: "#05080b",
+    parent: document.body,
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    physics: { default: "arcade", arcade: { gravity: { y: GRAV }, fps: 120, tileBias: 24, debug: false } },
+    render: { antialias: true, powerPreference: "high-performance" },
+    scene: [Boot, Menu, Game],
+  });
+}
+</script>
+</body>
+</html>

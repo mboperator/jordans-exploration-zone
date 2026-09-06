@@ -14,6 +14,7 @@
     --dim: #8a97a5;
     --breach: #ff4655;
     --krusty: #ffd24a;
+    --cross: #4bb4ff;
   }
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; }
@@ -28,7 +29,7 @@
       radial-gradient(55rem 38rem at 92% 108%, rgba(255,210,74,0.06), transparent 60%);
     background-attachment: fixed;
   }
-  .wrap { max-width: 60rem; margin: 0 auto; padding: 5rem 1.5rem 4rem; }
+  .wrap { max-width: 72rem; margin: 0 auto; padding: 5rem 1.5rem 4rem; }
 
   header { margin-bottom: 3.5rem; }
   .eyebrow {
@@ -44,7 +45,8 @@
   .lede { margin: 0; max-width: 34rem; color: var(--dim); font-size: 1.05rem; }
   .lede b { color: var(--ink); font-weight: 600; }
 
-  .grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(2, 1fr); }
+  .grid { display: grid; gap: 1.25rem; grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 62rem) { .grid { grid-template-columns: repeat(2, 1fr); } }
   @media (max-width: 46rem) { .grid { grid-template-columns: 1fr; } .wrap { padding-top: 3rem; } }
 
   .card {
@@ -78,6 +80,11 @@
   .body { padding: 1.25rem 1.35rem 1.4rem; display: flex; flex-direction: column; gap: .55rem; flex: 1; }
   .name { margin: 0; font-size: 1.22rem; font-weight: 700; letter-spacing: -0.01em; }
   .name span { color: var(--accent); }
+  .by {
+    margin: -.25rem 0 .1rem;
+    font: 500 .7rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--dim);
+  }
   .blurb { margin: 0; color: var(--dim); font-size: .95rem; flex: 1; }
   .tags {
     display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .35rem; padding: 0; list-style: none;
@@ -160,6 +167,31 @@
           run. Find the white key, free Patrick, and don't leave without him.</p>
         <ul class="tags">
           <li>Survival horror</li><li>Raycast 3D</li><li>36 skins</li>
+        </ul>
+        <p class="play">Play</p>
+      </div>
+    </a>
+
+
+    <a class="card" href="cross-section.html" style="--accent: var(--cross)">
+      <div class="art">
+        <!-- the two apertures: the entire game is the relationship between them -->
+        <svg viewBox="0 0 100 100" role="img" aria-label="Two portals">
+          <ellipse cx="30" cy="50" rx="11" ry="29" fill="none" stroke="#4bb4ff" stroke-width="5"/>
+          <ellipse cx="30" cy="50" rx="5" ry="22" fill="#0a1017" opacity=".9"/>
+          <ellipse cx="70" cy="50" rx="11" ry="29" fill="none" stroke="#ff9b28" stroke-width="5"/>
+          <ellipse cx="70" cy="50" rx="5" ry="22" fill="#0a1017" opacity=".9"/>
+          <path d="M41 50h18" stroke="#8aa0b2" stroke-width="2.5" stroke-dasharray="4 4" opacity=".8"/>
+        </svg>
+      </div>
+      <div class="body">
+        <h2 class="name">CROSS <span>SECTION</span></h2>
+        <p class="by">by Micah</p>
+        <p class="blurb">A 2D portal puzzler. Repulsion and propulsion gels, excursion
+          funnels, hard light bridges and discouragement beams — fourteen chambers, each
+          one fitting on a single screen.</p>
+        <ul class="tags">
+          <li>Puzzle platformer</li><li>14 chambers</li><li>Phaser 3</li>
         </ul>
         <p class="play">Play</p>
       </div>
