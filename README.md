@@ -10,6 +10,7 @@ assets, no audio files, no build step.
 |---|---|
 | [BREACH POINT](breach-point.html) | Round-based tactical shooter, 3v3, with P2P multiplayer |
 | [Krusty Krab Escape](krusty-krab-escape.html) | First-person survival-horror escape |
+| [CROSS SECTION](cross-section.html) | 2D portal puzzler — gels, funnels, bridges and beams (by Micah) |
 
 ---
 
@@ -114,3 +115,68 @@ corner badge, which walks when you walk.
 Nothing. It's a hand-written raycaster — DDA wall casting, a per-column z-buffer,
 box-model 3D characters on a forward-kinematics walk rig, procedural textures and
 a Web Audio synth. One file, no dependencies, no network calls.
+
+
+---
+
+# CROSS SECTION
+
+*by Micah.*
+
+A 2D portal puzzler. Fourteen Aperture test chambers, and **the whole chamber
+fits on one screen** — the camera never moves, so every solution is one you can
+see from where you are standing.
+
+## Controls
+
+| | |
+|---|---|
+| Move | `A` `D` or arrows |
+| Jump | `Space` / `W` — hold for height |
+| Blue portal | Left mouse |
+| Orange portal | Right mouse, or `F` |
+| Pick up / put down | `E` |
+| Press a pedestal button | `E` next to it |
+| Rotate a mirror cube | `Q` |
+| Restart the chamber | `R` |
+| Menu | `Esc` |
+| Mute | `M` |
+
+Keyboard and mouse required. Progress and best times are saved to
+`localStorage`.
+
+## The elements
+
+Portals conserve speed and rotate direction into the exit aperture's frame —
+fall in fast, come out fast, pointing somewhere else. Everything else in the
+chamber goes through them too:
+
+- **Repulsion gel** (blue) — land on it and you leave faster than you arrived.
+  Hold jump on the bounce to keep climbing.
+- **Propulsion gel** (orange) — a runway. Top speed more than doubles, which is
+  the difference between clearing a ten-tile gap and not.
+- **Conversion gel** (white) — makes any surface portal-conductive. It is how
+  you put an aperture somewhere the chamber never intended.
+- **Excursion funnels** — carry you and anything else along their axis, and
+  keep going out of the far portal.
+- **Hard light bridges** — solid, walkable, and a wall when they are vertical.
+  Redirecting one is usually the puzzle.
+- **Thermal discouragement beams** — lethal, reflected 90° by a redirection
+  cube, and answered by a catcher that latches once lit.
+- **Emancipation grills** — cross one and both your apertures fizzle, and
+  whatever you were carrying does too.
+- **Weighted cubes, floor buttons, timed pedestals, aerial faith plates,
+  turrets** and a great deal of toxic goo.
+
+## Chambers
+
+They teach in order: apertures, then momentum, then one new element per chamber,
+then a final exam that needs most of them at once. Chamber 1 hands you portals
+that are already placed; chamber 2 gives you one of the two; chamber 3 gives you
+the device.
+
+## Built with
+
+[Phaser 3](https://phaser.io/) (Arcade physics) from a CDN, and nothing else.
+Every texture, character, sound and particle is generated in code at load time —
+the portal apertures, the panelled walls, the gel, the synth. One file.
